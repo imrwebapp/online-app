@@ -1,0 +1,65 @@
+name: al_quran_mp3
+description: Beautiful offline Quran audio app (iOS & Android)
+publish_to: "none"
+version: 1.0.0+2
+
+environment:
+  sdk: ">=2.18.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  provider: ^6.0.5
+  audioplayers: ^6.5.1
+  shared_preferences: ^2.1.1
+  permission_handler: ^12.0.1
+  google_fonts: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
+  geolocator: ^14.0.2 
+  flutter_local_notifications: ^19.5.0
+  font_awesome_flutter: ^10.7.0
+  url_launcher: ^6.1.10
+  adhan: ^2.0.0
+  timezone: ^0.10.0
+  flutter_compass: ^0.8.1
+  sensors_plus: ^7.0.0
+  android_alarm_manager_plus: ^5.0.0
+  vibration: ^3.1.4
+  
+  # NEW DEPENDENCIES FOR DOWNLOAD FEATURE
+  http: ^1.1.0              # For downloading files
+  path_provider: ^2.1.1     # For getting local storage paths
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+   
+flutter_icons:
+  android: true
+  ios: true
+  image_path: "assets/icon/logo.jpg"
+  adaptive_icon_background: "#ffffff"
+  adaptive_icon_foreground: "assets/icon/logo.jpg"
+  
+flutter:
+  uses-material-design: true
+
+  assets:
+    # Only keep azan.mp3 - Quran audios will be downloaded from GitHub
+    - assets/audios/azan.mp3
+    - assets/images/logo.jpg
+    - assets/images/player_bg.jpg
+    - assets/icon/quran.png
+    - assets/icon/azkar.png
+    - assets/icon/tasbih.png
+    - assets/icon/favorite.png
+    - assets/icon/settings.png
+    - assets/images/splash_bg.jpg
+    - assets/icon/qibla.png
+    - assets/images/qibla_bg.jpg
+    - assets/images/mosque_bg.jpg
+    - assets/images/compass.png
+    - assets/icon/logo.jpg
+    - assets/images/background.jpg
+    - assets/images/lucky_draw.jpeg
