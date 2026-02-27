@@ -74,6 +74,8 @@
 	<!-- ============================== -->
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>This app uses your location to calculate accurate prayer times.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+<string>This app uses your location to calculate accurate prayer times and send Azan reminders.</string>
 
 	<!-- ============================== -->
 	<!-- 🎧 BACKGROUND AUDIO SUPPORT -->
