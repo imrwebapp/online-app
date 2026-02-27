@@ -64,7 +64,7 @@ class PostScreen extends StatelessWidget {
                 child: Image.asset(
                   'assets/images/lucky_draw.jpeg', // Replace with your image
                   fit: BoxFit.contain,
-                  height: 80, // Adjust height to leave empty space
+                  height: 110, // Adjust height to leave empty space
                 ),
               ),
             ),

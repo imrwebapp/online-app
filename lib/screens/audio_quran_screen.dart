@@ -6,7 +6,7 @@ import '../services/favorite_service.dart';
 import '../services/audio_service.dart';
 import '../services/audio_download_service.dart';
 import 'player_screen.dart';
-import 'favorites_screen.dart'; // ⭐ Added import
+import 'favorites_screen.dart';
 
 class AudioQuranScreen extends StatefulWidget {
   const AudioQuranScreen({super.key});
@@ -49,7 +49,7 @@ class _AudioQuranScreenState extends State<AudioQuranScreen> {
               ),
               child: Row(
                 children: [
-                     // 🔙 Back Arrow (ADDED)
+                  // 🔙 Back Arrow
                   IconButton(
                     icon: const Icon(Icons.arrow_back, color: Colors.white),
                     onPressed: () => Navigator.pop(context),
@@ -75,7 +75,7 @@ class _AudioQuranScreenState extends State<AudioQuranScreen> {
                     ),
                   ),
 
-                  // ⭐ Favorite button added
+                  // ⭐ Favorite button
                   IconButton(
                     icon: const Icon(Icons.star, color: Colors.white),
                     onPressed: () {
@@ -148,8 +148,11 @@ class _AudioQuranScreenState extends State<AudioQuranScreen> {
                 itemBuilder: (ctx, i) {
                   final s = filtered[i];
                   final isFav = favService.isFav(s.number);
-                  final isPlaying = audioService.currentSurah?.number == s.number &&
-                      audioService.isPlaying;
+                  
+                  // ✅ FIXED: Check if this is the current surah
+                  final isCurrentSurah = audioService.currentSurah?.number == s.number;
+                  final isPlaying = isCurrentSurah && audioService.isPlaying;
+                  
                   final isDownloaded = downloadService.isDownloaded(s.number);
                   final isDownloading =
                       downloadService.isDownloading[s.number] ?? false;
@@ -268,21 +271,31 @@ class _AudioQuranScreenState extends State<AudioQuranScreen> {
                               },
                             ),
 
-                          // Play button
+                          // ✅ FIXED: Play/Pause button with proper toggle
                           IconButton(
                             icon: Icon(
-                              isPlaying ? Icons.equalizer : Icons.play_arrow,
-                              color: isPlaying ? Colors.teal : Colors.grey,
+                              isPlaying ? Icons.pause : Icons.play_arrow,
+                              color: isCurrentSurah ? Colors.teal : Colors.grey,
                             ),
                             onPressed: isDownloading
                                 ? null
-                                : () {
-                                    audioService.setSurahAndPlay(s);
+                                : () async {
+                                    if (isCurrentSurah && audioService.isPlaying) {
+                                      // If this surah is playing, pause it
+                                      await audioService.pause();
+                                    } else if (isCurrentSurah && !audioService.isPlaying) {
+                                      // If this surah is loaded but paused, resume it
+                                      await audioService.play();
+                                    } else {
+                                      // If this is a different surah, load and play it
+                                      audioService.setSurahAndPlay(s);
+                                    }
+                                    
+                                    // Navigate to player screen
                                     Navigator.push(
                                       context,
                                       MaterialPageRoute(
-                                        builder: (_) =>
-                                            PlayerScreen(surah: s),
+                                        builder: (_) => PlayerScreen(surah: s),
                                       ),
                                     );
                                   },

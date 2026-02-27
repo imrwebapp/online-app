@@ -1,7 +1,7 @@
 name: al_quran_mp3
 description: Beautiful offline Quran audio app (iOS & Android)
 publish_to: "none"
-version: 1.0.0+2
+version: 1.0.0+4
 
 environment:
   sdk: ">=2.18.0 <4.0.0"

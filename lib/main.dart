@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:timezone/data/latest.dart' as tz;
 import 'package:android_alarm_manager_plus/android_alarm_manager_plus.dart';
+import 'dart:io';
 
 import 'services/favorite_service.dart';
 import 'services/audio_service.dart';
@@ -26,10 +27,22 @@ Future<void> main() async {
 
   // Initialize timezone & alarm manager
   tz.initializeTimeZones();
-  await AndroidAlarmManager.initialize();
+  // await AndroidAlarmManager.initialize();
+  if (Platform.isAndroid) { await AndroidAlarmManager.initialize(); } 
 
   // Initialize notifications
   await _initNotificationsWithoutPermission();
+  if (Platform.isIOS) {
+  final iosImpl = flutterLocalNotificationsPlugin
+      .resolvePlatformSpecificImplementation<
+          IOSFlutterLocalNotificationsPlugin>();
+
+  await iosImpl?.requestPermissions(
+    alert: true,
+    badge: true,
+    sound: true,
+  );
+}
 
   // Initialize your services
   final favService = FavoriteService();
