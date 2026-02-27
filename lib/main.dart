@@ -4,6 +4,8 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:timezone/data/latest.dart' as tz;
 import 'package:android_alarm_manager_plus/android_alarm_manager_plus.dart';
 import 'dart:io';
+import 'dart:async';
+import 'dart:developer';
 
 import 'services/favorite_service.dart';
 import 'services/audio_service.dart';
@@ -20,70 +22,116 @@ final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
     FlutterLocalNotificationsPlugin();
 
 // ===================================================
-// 🏁 MAIN ENTRY POINT
+// 🏁 MAIN ENTRY POINT (SAFE VERSION)
 // ===================================================
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Initialize timezone & alarm manager
-  tz.initializeTimeZones();
-  // await AndroidAlarmManager.initialize();
-  if (Platform.isAndroid) { await AndroidAlarmManager.initialize(); } 
+  // Catch Flutter framework errors
+  FlutterError.onError = (FlutterErrorDetails details) {
+    FlutterError.presentError(details);
+    log("FLUTTER ERROR: ${details.exception}");
+    log(details.stack.toString());
+  };
 
-  // Initialize notifications
-  await _initNotificationsWithoutPermission();
-  if (Platform.isIOS) {
-  final iosImpl = flutterLocalNotificationsPlugin
-      .resolvePlatformSpecificImplementation<
-          IOSFlutterLocalNotificationsPlugin>();
+  runZonedGuarded(() async {
+    tz.initializeTimeZones();
 
-  await iosImpl?.requestPermissions(
-    alert: true,
-    badge: true,
-    sound: true,
-  );
-}
+    if (Platform.isAndroid) {
+      await AndroidAlarmManager.initialize();
+    }
 
-  // Initialize your services
-  final favService = FavoriteService();
-  await favService.loadFavorites();
+    await _initNotificationsWithoutPermission();
 
-  final settingsService = SettingsService();
-  await settingsService.initAzanService();
+    if (Platform.isIOS) {
+      final iosImpl = flutterLocalNotificationsPlugin
+          .resolvePlatformSpecificImplementation<
+              IOSFlutterLocalNotificationsPlugin>();
 
-  // Initialize download service
-  final downloadService = AudioDownloadService();
+      await iosImpl?.requestPermissions(
+        alert: true,
+        badge: true,
+        sound: true,
+      );
+    }
 
-  // Initialize audio service with download service
-  final audioService = AudioService(downloadService: downloadService);
+    final favService = FavoriteService();
+    await favService.loadFavorites();
 
-  // Run App
-  runApp(
-    MultiProvider(
-      providers: [
-        ChangeNotifierProvider<FavoriteService>.value(value: favService),
-        ChangeNotifierProvider<AudioDownloadService>.value(value: downloadService),
-        ChangeNotifierProvider<AudioService>.value(value: audioService),
-        ChangeNotifierProvider<SettingsService>.value(value: settingsService),
-        ChangeNotifierProvider<AzanService>(create: (_) => AzanService()),
-      ],
-      child: MyApp(favService: favService),
-    ),
-  );
+    final settingsService = SettingsService();
 
-  // Ask for permissions post-frame
-  WidgetsBinding.instance.addPostFrameCallback((_) async {
-    await NotificationService.ensureAndroidPermissions();
+    final downloadService = AudioDownloadService();
+    final audioService = AudioService(downloadService: downloadService);
+
+    // ✅ RUN UI FIRST
+    runApp(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider.value(value: favService),
+          ChangeNotifierProvider.value(value: downloadService),
+          ChangeNotifierProvider.value(value: audioService),
+          ChangeNotifierProvider.value(value: settingsService),
+          ChangeNotifierProvider(create: (_) => AzanService()),
+        ],
+        child: const MyApp(),
+      ),
+    );
+
+    // ✅ Initialize Azan AFTER UI loads (safe)
+    Future.microtask(() async {
+      try {
+        await settingsService.initAzanService();
+      } catch (e, s) {
+        log("AZAN INIT ERROR: $e");
+        log(s.toString());
+      }
+    });
+
+    // Android permission post-frame
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      try {
+        await NotificationService.ensureAndroidPermissions();
+      } catch (e) {
+        log("ANDROID PERMISSION ERROR: $e");
+      }
+    });
+
+  }, (error, stack) {
+    log("ZONED ERROR: $error");
+    log(stack.toString());
+
+    // 🔴 Show error on screen instead of white screen
+    runApp(
+      MaterialApp(
+        home: Scaffold(
+          backgroundColor: Colors.red,
+          body: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              child: Text(
+                error.toString(),
+                style: const TextStyle(color: Colors.white),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   });
 }
 
 // ===================================================
-// 🔧 Initialize Notifications (without permission request)
+// 🔧 Initialize Notifications
 // ===================================================
 Future<void> _initNotificationsWithoutPermission() async {
-  const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
-  const initSettings = InitializationSettings(android: androidInit);
+  const androidInit =
+      AndroidInitializationSettings('@mipmap/ic_launcher');
+
+  const initSettings =
+      InitializationSettings(android: androidInit);
+
   await flutterLocalNotificationsPlugin.initialize(initSettings);
+
   await NotificationService.init();
 }
 
@@ -91,61 +139,52 @@ Future<void> _initNotificationsWithoutPermission() async {
 // 🎨 APP WIDGET
 // ===================================================
 class MyApp extends StatelessWidget {
-  final FavoriteService favService;
-  const MyApp({required this.favService, super.key});
+  const MyApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return Consumer<SettingsService>(
       builder: (context, settings, _) {
-      return MaterialApp(
-  debugShowCheckedModeBanner: false,
-  title: 'Al Quran MP3',
+        return MaterialApp(
+          debugShowCheckedModeBanner: false,
+          title: 'Al Quran MP3',
 
-  // 🌞 LIGHT THEME
-  theme: ThemeData(
-    brightness: Brightness.light,
-    primarySwatch: Colors.teal,
-    fontFamily: 'NotoSans',
+          theme: ThemeData(
+            brightness: Brightness.light,
+            primarySwatch: Colors.teal,
+            fontFamily: 'NotoSans',
+            appBarTheme: const AppBarTheme(
+              backgroundColor: Color.fromARGB(255, 14, 76, 61),
+              iconTheme: IconThemeData(color: Colors.white),
+              titleTextStyle: TextStyle(
+                color: Colors.white,
+                fontSize: 20,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
 
-    // ✅ ADD THIS BLOCK
-    appBarTheme: const AppBarTheme(
-      backgroundColor: Color.fromARGB(255, 14, 76, 61),
-      iconTheme: IconThemeData(
-        color: Colors.white, // 🔙 back arrow
-      ),
-      titleTextStyle: TextStyle(
-        color: Colors.white, // 📝 title
-        fontSize: 20,
-        fontWeight: FontWeight.w600,
-      ),
-    ),
-  ),
+          darkTheme: ThemeData(
+            brightness: Brightness.dark,
+            primarySwatch: Colors.teal,
+            fontFamily: 'NotoSans',
+            appBarTheme: const AppBarTheme(
+              backgroundColor: Color.fromARGB(255, 14, 76, 61),
+              iconTheme: IconThemeData(color: Colors.white),
+              titleTextStyle: TextStyle(
+                color: Colors.white,
+                fontSize: 20,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
 
-  // 🌙 DARK THEME
-  darkTheme: ThemeData(
-    brightness: Brightness.dark,
-    primarySwatch: Colors.teal,
-    fontFamily: 'NotoSans',
+          themeMode:
+              settings.darkMode ? ThemeMode.dark : ThemeMode.light,
 
-    // ✅ ADD THIS BLOCK
-    appBarTheme: const AppBarTheme(
-      backgroundColor: Color.fromARGB(255, 14, 76, 61),
-      iconTheme: IconThemeData(
-        color: Colors.white,
-      ),
-      titleTextStyle: TextStyle(
-        color: Colors.white,
-        fontSize: 20,
-        fontWeight: FontWeight.w600,
-      ),
-    ),
-  ),
-
-  themeMode: settings.darkMode ? ThemeMode.dark : ThemeMode.light,
-  home: SplashScreen(),
-);
-      }
+          home: const SplashScreen(),
+        );
+      },
     );
   }
 }
