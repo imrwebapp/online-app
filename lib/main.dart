@@ -22,7 +22,7 @@ final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
     FlutterLocalNotificationsPlugin();
 
 // ===================================================
-// 🏁 MAIN ENTRY POINT (SAFE VERSION)
+// 🏁 MAIN ENTRY POINT
 // ===================================================
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -43,6 +43,7 @@ Future<void> main() async {
 
     await _initNotificationsWithoutPermission();
 
+    // Request iOS permissions AFTER initialization
     if (Platform.isIOS) {
       final iosImpl = flutterLocalNotificationsPlugin
           .resolvePlatformSpecificImplementation<
@@ -59,11 +60,10 @@ Future<void> main() async {
     await favService.loadFavorites();
 
     final settingsService = SettingsService();
-
     final downloadService = AudioDownloadService();
     final audioService = AudioService(downloadService: downloadService);
 
-    // ✅ RUN UI FIRST
+    // ✅ Run UI FIRST
     runApp(
       MultiProvider(
         providers: [
@@ -77,7 +77,7 @@ Future<void> main() async {
       ),
     );
 
-    // ✅ Initialize Azan AFTER UI loads (safe)
+    // ✅ Initialize Azan AFTER UI loads
     Future.microtask(() async {
       try {
         await settingsService.initAzanService();
@@ -87,7 +87,7 @@ Future<void> main() async {
       }
     });
 
-    // Android permission post-frame
+    // Android permission request
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       try {
         await NotificationService.ensureAndroidPermissions();
@@ -100,18 +100,14 @@ Future<void> main() async {
     log("ZONED ERROR: $error");
     log(stack.toString());
 
-    // 🔴 Show error on screen instead of white screen
     runApp(
-      MaterialApp(
+      const MaterialApp(
         home: Scaffold(
           backgroundColor: Colors.red,
           body: Center(
-            child: Padding(
-              padding: const EdgeInsets.all(20),
-              child: Text(
-                error.toString(),
-                style: const TextStyle(color: Colors.white),
-              ),
+            child: Text(
+              "Startup Error - Check Logs",
+              style: TextStyle(color: Colors.white),
             ),
           ),
         ),
@@ -121,14 +117,22 @@ Future<void> main() async {
 }
 
 // ===================================================
-// 🔧 Initialize Notifications
+// 🔧 Initialize Notifications (FIXED FOR iOS)
 // ===================================================
 Future<void> _initNotificationsWithoutPermission() async {
   const androidInit =
       AndroidInitializationSettings('@mipmap/ic_launcher');
 
-  const initSettings =
-      InitializationSettings(android: androidInit);
+  const iosInit = DarwinInitializationSettings(
+    requestAlertPermission: false,
+    requestBadgePermission: false,
+    requestSoundPermission: false,
+  );
+
+  const initSettings = InitializationSettings(
+    android: androidInit,
+    iOS: iosInit,
+  );
 
   await flutterLocalNotificationsPlugin.initialize(initSettings);
 
