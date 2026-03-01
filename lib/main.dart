@@ -27,7 +27,6 @@ final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Catch Flutter framework errors
   FlutterError.onError = (FlutterErrorDetails details) {
     FlutterError.presentError(details);
     log("FLUTTER ERROR: ${details.exception}");
@@ -35,6 +34,7 @@ Future<void> main() async {
   };
 
   runZonedGuarded(() async {
+
     tz.initializeTimeZones();
 
     if (Platform.isAndroid) {
@@ -43,7 +43,6 @@ Future<void> main() async {
 
     await _initNotificationsWithoutPermission();
 
-    // Request iOS permissions AFTER initialization
     if (Platform.isIOS) {
       final iosImpl = flutterLocalNotificationsPlugin
           .resolvePlatformSpecificImplementation<
@@ -63,7 +62,6 @@ Future<void> main() async {
     final downloadService = AudioDownloadService();
     final audioService = AudioService(downloadService: downloadService);
 
-    // ✅ Run UI FIRST
     runApp(
       MultiProvider(
         providers: [
@@ -77,7 +75,6 @@ Future<void> main() async {
       ),
     );
 
-    // ✅ Initialize Azan AFTER UI loads
     Future.microtask(() async {
       try {
         await settingsService.initAzanService();
@@ -87,7 +84,6 @@ Future<void> main() async {
       }
     });
 
-    // Android permission request
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       try {
         await NotificationService.ensureAndroidPermissions();
@@ -97,17 +93,24 @@ Future<void> main() async {
     });
 
   }, (error, stack) {
+
     log("ZONED ERROR: $error");
     log(stack.toString());
 
     runApp(
-      const MaterialApp(
+      MaterialApp(
         home: Scaffold(
           backgroundColor: Colors.red,
           body: Center(
-            child: Text(
-              "Startup Error - Check Logs",
-              style: TextStyle(color: Colors.white),
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              child: Text(
+                error.toString(),
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 16,
+                ),
+              ),
             ),
           ),
         ),
@@ -117,9 +120,10 @@ Future<void> main() async {
 }
 
 // ===================================================
-// 🔧 Initialize Notifications (FIXED FOR iOS)
+// 🔧 Initialize Notifications
 // ===================================================
 Future<void> _initNotificationsWithoutPermission() async {
+
   const androidInit =
       AndroidInitializationSettings('@mipmap/ic_launcher');
 
