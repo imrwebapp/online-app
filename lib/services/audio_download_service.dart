@@ -166,9 +166,10 @@ class AudioDownloadService extends ChangeNotifier {
   //     return url;
   //   }
   // }
-  Future<String> getAudioPath(Surah surah) async {
+Future<String> getAudioPath(Surah surah) async {
   final localPath = await _getLocalPath(surah.audioAsset);
 
+  // 1️⃣ Play local file if downloaded
   if (await _fileExists(localPath)) {
     debugPrint('🎵 Playing local: $localPath');
     return localPath;
@@ -177,22 +178,22 @@ class AudioDownloadService extends ChangeNotifier {
   final rawUrl = '$baseUrl/${surah.audioAsset}';
 
   try {
-    final request = http.Request('GET', Uri.parse(rawUrl));
-    request.followRedirects = false;
+    final request = http.Request('GET', Uri.parse(rawUrl))
+      ..followRedirects = true
+      ..maxRedirects = 5;
 
     final response = await request.send();
 
-    if (response.isRedirect && response.headers['location'] != null) {
-      final redirectedUrl = response.headers['location']!;
-      debugPrint('➡️ Redirected to: $redirectedUrl');
-      return redirectedUrl;
-    }
+    // This gives the FINAL CDN URL after all redirects
+    final finalUrl = response.request?.url.toString() ?? rawUrl;
+
+    debugPrint('🌐 Streaming from resolved URL: $finalUrl');
+
+    return finalUrl;
   } catch (e) {
     debugPrint('⚠️ Redirect resolve failed: $e');
+    return rawUrl;
   }
-
-  debugPrint('🌐 Using original URL: $rawUrl');
-  return rawUrl;
 }
 
   // Download all Surahs
