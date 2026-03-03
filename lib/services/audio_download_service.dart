@@ -8,8 +8,7 @@ import '../data/surah_list.dart';
 
 class AudioDownloadService extends ChangeNotifier {
   // GitHub release URL
- static const String baseUrl =
-'https://raw.githubusercontent.com/aounrshah/audio-files/main';
+  static const String baseUrl = 'https://github.com/aounrshah/audio-files/releases/download/v1.0';
   
   // Track download progress for each Surah
   Map<int, double> downloadProgress = {}; // surahNumber -> progress (0.0 to 1.0)
@@ -154,19 +153,47 @@ class AudioDownloadService extends ChangeNotifier {
     }
   }
 
-  // Get file path for AudioPlayer (local or online)
-  Future<String> getAudioPath(Surah surah) async {
-    final localPath = await _getLocalPath(surah.audioAsset);
+  // // Get file path for AudioPlayer (local or online)
+  // Future<String> getAudioPath(Surah surah) async {
+  //   final localPath = await _getLocalPath(surah.audioAsset);
     
-    if (await _fileExists(localPath)) {
-      debugPrint('🎵 Playing from local: $localPath');
-      return localPath;
-    } else {
-      final url = '$baseUrl/${surah.audioAsset}';
-      debugPrint('🌐 Streaming from: $url');
-      return url;
-    }
+  //   if (await _fileExists(localPath)) {
+  //     debugPrint('🎵 Playing from local: $localPath');
+  //     return localPath;
+  //   } else {
+  //     final url = '$baseUrl/${surah.audioAsset}';
+  //     debugPrint('🌐 Streaming from: $url');
+  //     return url;
+  //   }
+  // }
+  Future<String> getAudioPath(Surah surah) async {
+  final localPath = await _getLocalPath(surah.audioAsset);
+
+  if (await _fileExists(localPath)) {
+    debugPrint('🎵 Playing local: $localPath');
+    return localPath;
   }
+
+  final rawUrl = '$baseUrl/${surah.audioAsset}';
+
+  try {
+    final request = http.Request('GET', Uri.parse(rawUrl));
+    request.followRedirects = false;
+
+    final response = await request.send();
+
+    if (response.isRedirect && response.headers['location'] != null) {
+      final redirectedUrl = response.headers['location']!;
+      debugPrint('➡️ Redirected to: $redirectedUrl');
+      return redirectedUrl;
+    }
+  } catch (e) {
+    debugPrint('⚠️ Redirect resolve failed: $e');
+  }
+
+  debugPrint('🌐 Using original URL: $rawUrl');
+  return rawUrl;
+}
 
   // Download all Surahs
   Future<void> downloadAll(List<Surah> surahs) async {
