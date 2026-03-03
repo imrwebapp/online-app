@@ -8,7 +8,8 @@ import '../data/surah_list.dart';
 
 class AudioDownloadService extends ChangeNotifier {
   // GitHub release URL
-  static const String baseUrl = 'https://github.com/aounrshah/audio-files/releases/download/v1.0';
+ static const String baseUrl =
+'https://raw.githubusercontent.com/aounrshah/audio-files/main';
   
   // Track download progress for each Surah
   Map<int, double> downloadProgress = {}; // surahNumber -> progress (0.0 to 1.0)
