@@ -169,7 +169,7 @@ class AudioDownloadService extends ChangeNotifier {
 Future<String> getAudioPath(Surah surah) async {
   final localPath = await _getLocalPath(surah.audioAsset);
 
-  // 1️⃣ Play local file if downloaded
+  // 1️⃣ If already downloaded → play local
   if (await _fileExists(localPath)) {
     debugPrint('🎵 Playing local: $localPath');
     return localPath;
@@ -178,13 +178,12 @@ Future<String> getAudioPath(Surah surah) async {
   final rawUrl = '$baseUrl/${surah.audioAsset}';
 
   try {
-    final request = http.Request('GET', Uri.parse(rawUrl))
+    final request = http.Request('HEAD', Uri.parse(rawUrl))
       ..followRedirects = true
       ..maxRedirects = 5;
 
     final response = await request.send();
 
-    // This gives the FINAL CDN URL after all redirects
     final finalUrl = response.request?.url.toString() ?? rawUrl;
 
     debugPrint('🌐 Streaming from resolved URL: $finalUrl');
