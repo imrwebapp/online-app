@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -86,7 +87,6 @@ class AudioDownloadService extends ChangeNotifier {
           '📦 Total size: ${(totalBytes / 1024 / 1024).toStringAsFixed(2)} MB');
 
       final file = File(localPath);
-      // Ensure parent directory exists
       await file.parent.create(recursive: true);
       final sink = file.openWrite();
       int downloadedBytes = 0;
@@ -141,70 +141,151 @@ class AudioDownloadService extends ChangeNotifier {
     }
   }
 
-  /// Returns a playable path for [surah].
-  ///
-  /// Priority:
-  ///   1. Local downloaded file → play from disk (always works on iOS).
-  ///   2. No local file → resolve ALL GitHub redirect hops manually so that
-  ///      AVPlayer on iOS receives the final CDN URL, not a redirect URL.
-  ///
-  /// The old HEAD-request trick does NOT work reliably on iOS because
-  /// `response.request?.url` reflects the Dart HTTP client's last request,
-  /// not what AVPlayer would end up following.  GitHub releases go through
-  /// at least two redirects (302 → 302 → 200) and AVPlayer bails on the
-  /// first one it cannot handle.
-  Future<String> getAudioPath(Surah surah) async {
-    final localPath = await _getLocalPath(surah.audioAsset);
+  // ─────────────────────────────────────────────────────────────────────────
+  // STREAMING / PLAYBACK PATH
+  // iOS AVPlayer cannot follow GitHub Releases' multi-hop redirects at all.
+  // Solution: always resolve to a local file path before handing to the player.
+  //   • Already downloaded  → instant play from documents dir.
+  //   • Temp cache exists   → play immediately, promote to permanent in bg.
+  //   • Nothing cached      → progressive download: buffer 256 KB first,
+  //                           return temp path so playback starts quickly,
+  //                           finish downloading the rest in the background,
+  //                           then promote to permanent storage automatically.
+  // ─────────────────────────────────────────────────────────────────────────
 
-    // 1️⃣ Already downloaded — play from disk, no network needed.
+  /// Returns a local file path that AudioPlayer can always play on iOS & Android.
+  Future<String> getAudioPath(Surah surah) async {
+    // 1️⃣ Fully downloaded — instant play, no network needed
+    final localPath = await _getLocalPath(surah.audioAsset);
     if (await _fileExists(localPath)) {
-      debugPrint('🎵 Playing local: $localPath');
+      debugPrint('🎵 Playing local (permanent): $localPath');
       return localPath;
     }
 
-    // 2️⃣ Not downloaded — resolve the full redirect chain manually.
-    //    We keep following Location headers until we get a non-redirect
-    //    response (or hit the safety limit). The final URL is a direct
-    //    CDN link that AVPlayer can open without any further redirects.
-    final rawUrl = '$baseUrl/${surah.audioAsset}';
-    String currentUrl = rawUrl;
+    // 2️⃣ Temp cache from a previous stream session — play immediately
+    final tempPath = await _getTempPath(surah.audioAsset);
+    if (await _fileExists(tempPath)) {
+      debugPrint('🎵 Playing from temp cache: $tempPath');
+      // Promote to permanent in background so next time is instant
+      _promoteToPermament(surah, tempPath, localPath);
+      return tempPath;
+    }
 
-    try {
-      const maxRedirects = 10;
-      final client = http.Client();
+    // 3️⃣ Nothing cached — progressive download then play
+    //    Waits only until minBufferBytes are on disk, then returns so the
+    //    player can start. The rest of the file downloads in the background.
+    debugPrint('⚡ Progressive download starting: ${surah.nameEn}');
+    await _startProgressiveDownload(surah, tempPath, localPath);
+    return tempPath;
+  }
 
-      for (int i = 0; i < maxRedirects; i++) {
-        final request = http.Request('GET', Uri.parse(currentUrl))
-          ..followRedirects = false // ← we handle redirects ourselves
-          ..headers['Range'] = 'bytes=0-0'; // tiny request, just for headers
+  /// Path inside the system temp/cache directory — separate from permanent downloads.
+  Future<String> _getTempPath(String audioAsset) async {
+    final dir = await getTemporaryDirectory();
+    final safeName = audioAsset.replaceAll('/', '_');
+    return '${dir.path}/stream_$safeName';
+  }
 
-        final response = await client.send(request);
-        await response.stream.drain(); // discard body bytes
+  /// Starts downloading [surah] to [tempPath].
+  /// Returns as soon as [minBufferBytes] are flushed to disk so the caller
+  /// can hand the path to AudioPlayer without noticeable delay.
+  /// The remainder of the file continues downloading in the background.
+  Future<void> _startProgressiveDownload(
+    Surah surah,
+    String tempPath,
+    String localPath, {
+    int minBufferBytes = 256 * 1024, // 256 KB ≈ 5-8 seconds of Quran audio
+  }) async {
+    final completer = Completer<void>();
+    bool bufferReached = false;
 
-        debugPrint(
-            '↪ Redirect step $i: ${response.statusCode} → $currentUrl');
+    // Fire-and-forget async closure — keeps downloading after we return
+    () async {
+      try {
+        final url = '$baseUrl/${surah.audioAsset}';
+        final request = http.Request('GET', Uri.parse(url))
+          ..followRedirects = true
+          ..maxRedirects = 10;
 
-        if (response.statusCode >= 300 && response.statusCode < 400) {
-          final location = response.headers['location'];
-          if (location == null || location.isEmpty) break;
+        final response = await request.send();
 
-          // Location can be relative or absolute
-          currentUrl =
-              Uri.parse(currentUrl).resolve(location).toString();
-        } else {
-          // Non-redirect response means we have the real URL
-          break;
+        if (response.statusCode != 200) {
+          if (!completer.isCompleted) {
+            completer.completeError(
+              Exception('HTTP ${response.statusCode}'),
+            );
+          }
+          return;
         }
-      }
 
-      client.close();
-      debugPrint('🌐 Resolved stream URL: $currentUrl');
-      return currentUrl;
+        final file = File(tempPath);
+        await file.parent.create(recursive: true);
+        final sink = file.openWrite();
+        int bytesWritten = 0;
+
+        await for (final chunk in response.stream) {
+          sink.add(chunk);
+          bytesWritten += chunk.length;
+
+          // ✅ Enough buffered — unblock the caller so playback starts now
+          if (!bufferReached && bytesWritten >= minBufferBytes) {
+            bufferReached = true;
+            await sink.flush(); // ensure bytes are physically on disk
+            debugPrint(
+              '▶️ Buffer ready (${(bytesWritten / 1024).toStringAsFixed(0)} KB)'
+              ' — returning path for playback',
+            );
+            if (!completer.isCompleted) completer.complete();
+          }
+        }
+
+        await sink.flush();
+        await sink.close();
+        debugPrint('✅ Background download complete: ${surah.nameEn}');
+
+        // If the file was very small and we never hit the buffer threshold,
+        // complete here so the caller is not left waiting forever.
+        if (!completer.isCompleted) completer.complete();
+
+        // Move finished temp file to permanent storage
+        await _promoteToPermament(surah, tempPath, localPath);
+      } catch (e) {
+        debugPrint('❌ Progressive download error: $e');
+        if (!completer.isCompleted) completer.completeError(e);
+      }
+    }();
+
+    // Wait only until the initial buffer is ready, then return
+    await completer.future;
+  }
+
+  /// Copies the completed temp file to the permanent downloads directory,
+  /// then removes the temp file and marks the surah as downloaded.
+  Future<void> _promoteToPermament(
+    Surah surah,
+    String tempPath,
+    String localPath,
+  ) async {
+    try {
+      final tempFile = File(tempPath);
+      if (!await tempFile.exists()) return;
+
+      final destFile = File(localPath);
+      await destFile.parent.create(recursive: true);
+      await tempFile.copy(localPath);
+      await tempFile.delete();
+
+      downloadedSurahs.add(surah.number);
+      await _saveDownloadedList();
+      notifyListeners();
+
+      debugPrint('📁 Promoted to permanent: ${surah.nameEn}');
     } catch (e) {
-      debugPrint('⚠️ Redirect resolve failed, falling back to raw URL: $e');
-      return rawUrl;
+      debugPrint('⚠️ Promotion failed (non-critical): $e');
     }
   }
+
+  // ─────────────────────────────────────────────────────────────────────────
 
   Future<void> downloadAll(List<Surah> surahs) async {
     isBatchDownloading = true;

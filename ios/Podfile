@@ -34,5 +34,23 @@ end
 post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
+
+    # ── Required for permission_handler on iOS ──────────────────────────
+    # Without these macros, permission dialogs are silently suppressed
+    # even if Info.plist has the correct usage description strings.
+    target.build_configurations.each do |config|
+      config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] ||= [
+        '$(inherited)',
+
+        ## dart: [PermissionGroup.location, PermissionGroup.locationWhenInUse]
+        'PERMISSION_LOCATION=1',
+
+        ## dart: PermissionGroup.notification
+        'PERMISSION_NOTIFICATIONS=1',
+
+        ## dart: PermissionGroup.sensors
+        'PERMISSION_SENSORS=1',
+      ]
+    end
   end
 end
