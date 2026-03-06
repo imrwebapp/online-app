@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:audioplayers/audioplayers.dart';
+import 'package:just_audio/just_audio.dart';
 import '../models/surah.dart';
 import 'azan_foreground_service.dart';
 import 'audio_download_service.dart';
@@ -8,131 +8,102 @@ import 'audio_download_service.dart';
 class AudioService extends ChangeNotifier {
   final AudioPlayer _player = AudioPlayer();
   final AudioDownloadService? downloadService;
-  
+
   Surah? currentSurah;
   bool isPlaying = false;
   bool isLoading = false;
   Duration duration = Duration.zero;
   Duration position = Duration.zero;
-  
-  StreamSubscription<Duration>? _posSub;
-  StreamSubscription<Duration>? _durSub;
-  StreamSubscription<void>? _compSub;
-  StreamSubscription<PlayerState>? _stateSub;
 
-  // NEW: Track ongoing operations to prevent concurrent calls
+  StreamSubscription<Duration>? _posSub;
+  StreamSubscription<Duration?>? _durSub;
+  StreamSubscription<PlayerState>? _stateSub;
+  StreamSubscription<ProcessingState>? _processingStateSub;
+
   bool _isOperationInProgress = false;
-  
-  // NEW: Release mode configuration
-  static const Duration _operationTimeout = Duration(seconds: 5);
 
   AudioService({this.downloadService}) {
-    // Configure player for better performance
-    _configurePlayer();
     _setupListeners();
   }
 
-  // NEW: Configure player settings
-  void _configurePlayer() {
-    // Set player mode to low latency for better responsiveness
-    _player.setPlayerMode(PlayerMode.mediaPlayer);
-    
-    // Set release mode to stop (safer than release)
-    _player.setReleaseMode(ReleaseMode.stop);
-  }
-
   void _setupListeners() {
-    _durSub = _player.onDurationChanged.listen((d) {
-      duration = d;
-      notifyListeners();
-    });
-
-    _posSub = _player.onPositionChanged.listen((p) {
+    // Position updates
+    _posSub = _player.positionStream.listen((p) {
       position = p;
       notifyListeners();
     });
 
-    _compSub = _player.onPlayerComplete.listen((_) {
-      isPlaying = false;
-      position = duration;
+    // Duration updates
+    _durSub = _player.durationStream.listen((d) {
+      duration = d ?? Duration.zero;
       notifyListeners();
     });
 
-    _stateSub = _player.onPlayerStateChanged.listen((state) {
+    // Playing state updates
+    _stateSub = _player.playerStateStream.listen((state) {
       final wasPlaying = isPlaying;
-      isPlaying = state == PlayerState.playing;
-      
-      if (wasPlaying != isPlaying) {
+
+      // completed → reset position
+      if (state.processingState == ProcessingState.completed) {
+        isPlaying = false;
+        position = duration;
         notifyListeners();
+        return;
       }
+
+      isPlaying = state.playing;
+      if (wasPlaying != isPlaying) notifyListeners();
     });
   }
 
-  // ------------------------------
-  // Enhanced Surah Player with ANR Protection
-  // ------------------------------
-  Future<void> setSurahAndPlay(Surah s, {bool autoplay = true}) async {
-    // Prevent concurrent operations
-    if (_isOperationInProgress) {
-      debugPrint('⏳ Operation in progress, queuing request');
-      await Future.delayed(Duration(milliseconds: 100));
-      if (_isOperationInProgress) {
-        debugPrint('⚠️ Still busy, aborting request');
-        return;
-      }
-    }
+  // ─────────────────────────────────────────────────────────────────────────
 
+  Future<void> setSurahAndPlay(Surah s, {bool autoplay = true}) async {
+    if (_isOperationInProgress) {
+      debugPrint('⏳ Operation in progress, ignoring request');
+      return;
+    }
     _isOperationInProgress = true;
 
     try {
       if (currentSurah?.number != s.number) {
-        // Use safe stop with timeout
         await _safeStop();
-        
         currentSurah = s;
         position = Duration.zero;
         duration = Duration.zero;
         notifyListeners();
       }
-      
-      if (autoplay) {
-        await play();
-      }
+
+      if (autoplay) await play();
     } catch (e) {
-      debugPrint('❌ Error in setSurahAndPlay: $e');
-      rethrow;
+      debugPrint('❌ setSurahAndPlay error: $e');
     } finally {
       _isOperationInProgress = false;
     }
   }
 
-  // NEW: Safe stop with timeout
   Future<void> _safeStop() async {
     try {
       await _player.stop().timeout(
-        Duration(seconds: 2),
+        const Duration(seconds: 2),
         onTimeout: () {
-          debugPrint('⚠️ Stop operation timed out - forcing state reset');
-          // Force state update even if stop hangs
+          debugPrint('⚠️ Stop timed out');
           isPlaying = false;
           position = Duration.zero;
         },
       );
     } catch (e) {
-      debugPrint('⚠️ Error stopping player: $e');
-      // Continue anyway - don't let stop errors block playback
+      debugPrint('⚠️ Stop error (non-blocking): $e');
       isPlaying = false;
       position = Duration.zero;
     }
   }
 
   Future<void> play() async {
-    // Prevent multiple simultaneous play calls
     if (isLoading || _isOperationInProgress) {
-      debugPrint('⏳ Already loading/busy, ignoring play request');
+      debugPrint('⏳ Busy, ignoring play');
       return;
     }
-
     if (currentSurah == null) {
       debugPrint('⚠️ No surah selected');
       return;
@@ -141,150 +112,88 @@ class AudioService extends ChangeNotifier {
     _isOperationInProgress = true;
 
     try {
-      // Check current player state
-      final currentState = _player.state;
-      
-      // If already playing, do nothing
-      if (currentState == PlayerState.playing) {
-        debugPrint('✅ Already playing');
+      // Already playing
+      if (_player.playing) {
         isPlaying = true;
         notifyListeners();
         return;
       }
 
-      // If paused, just resume with timeout
-      if (currentState == PlayerState.paused) {
-        debugPrint('▶️ Resuming playback');
-        await _player.resume().timeout(
-          _operationTimeout,
-          onTimeout: () {
-            debugPrint('⚠️ Resume timed out');
-            throw TimeoutException('Resume operation timed out');
-          },
-        );
+      // Paused → resume without re-loading source
+      if (_player.processingState == ProcessingState.ready &&
+          !_player.playing) {
+        debugPrint('▶️ Resuming');
+        await _player.play();
         isPlaying = true;
         notifyListeners();
         return;
       }
 
-      // Start new playback
+      // New playback — load source
       isLoading = true;
       notifyListeners();
 
-      String audioPath;
-      
-      // Get audio source with timeout
       if (downloadService != null) {
-        audioPath = await downloadService!.getAudioPath(currentSurah!).timeout(
-          Duration(seconds: 3),
-          onTimeout: () {
-            debugPrint('⚠️ getAudioPath timed out');
-            throw TimeoutException('Failed to get audio path');
-          },
-        );
-        
-        // Play with timeout protection
-        if (audioPath.startsWith('http')) {
-          debugPrint('🌐 Streaming: $audioPath');
-          await _player.play(UrlSource(audioPath)).timeout(
-            _operationTimeout,
-            onTimeout: () {
-              debugPrint('⚠️ Network play timed out');
-              throw TimeoutException('Network playback initialization timed out');
-            },
-          );
-        } else {
-          debugPrint('📱 Playing local: $audioPath');
-          await _player.play(DeviceFileSource(audioPath)).timeout(
-            _operationTimeout,
-            onTimeout: () {
-              debugPrint('⚠️ Local play timed out');
-              throw TimeoutException('Local playback initialization timed out');
-            },
-          );
-        }
+        final source = await downloadService!
+            .getAudioSource(currentSurah!)
+            .timeout(
+              const Duration(seconds: 10),
+              onTimeout: () => throw TimeoutException('getAudioSource timed out'),
+            );
+
+        debugPrint('🎵 Setting audio source...');
+        await _player.setAudioSource(source);
+        await _player.play();
       } else {
-        // Fallback to asset
-        audioPath = 'audios/${currentSurah!.audioAsset}';
-        debugPrint('📦 Playing asset: $audioPath');
-        await _player.play(AssetSource(audioPath)).timeout(
-          _operationTimeout,
-          onTimeout: () {
-            debugPrint('⚠️ Asset play timed out');
-            throw TimeoutException('Asset playback initialization timed out');
-          },
-        );
+        // Fallback: bundled asset
+        final assetPath = 'assets/audios/${currentSurah!.audioAsset}';
+        debugPrint('📦 Playing asset: $assetPath');
+        await _player.setAudioSource(AudioSource.asset(assetPath));
+        await _player.play();
       }
 
       isPlaying = true;
       isLoading = false;
       notifyListeners();
-      debugPrint('✅ Playback started successfully');
-      
+      debugPrint('✅ Playback started: ${currentSurah!.nameEn}');
     } on TimeoutException catch (e) {
       debugPrint('⏱️ Play timeout: $e');
       isPlaying = false;
       isLoading = false;
       notifyListeners();
-      rethrow;
     } catch (e) {
-      debugPrint('❌ Playback error: $e');
+      debugPrint('❌ Play error: $e');
       isPlaying = false;
       isLoading = false;
       notifyListeners();
-      rethrow;
     } finally {
       _isOperationInProgress = false;
     }
   }
 
   Future<void> pause() async {
-    // Prevent concurrent operations
-    if (_isOperationInProgress) {
-      debugPrint('⏳ Operation in progress, ignoring pause');
-      return;
-    }
-
-    // Check if already paused
-    if (!isPlaying && _player.state != PlayerState.playing) {
-      debugPrint('⏸️ Already paused');
-      return;
-    }
-
+    if (_isOperationInProgress) return;
     _isOperationInProgress = true;
 
     try {
-      // Pause with timeout protection
       await _player.pause().timeout(
-        Duration(seconds: 2),
+        const Duration(seconds: 2),
         onTimeout: () {
-          debugPrint('⚠️ Pause timed out - forcing state');
-          // Force state update even if pause hangs
           isPlaying = false;
         },
       );
-      
       isPlaying = false;
       notifyListeners();
-      debugPrint('⏸️ Paused successfully');
-      
-    } on TimeoutException catch (e) {
-      debugPrint('⏱️ Pause timeout: $e');
-      isPlaying = false;
-      notifyListeners();
-      rethrow;
     } catch (e) {
       debugPrint('❌ Pause error: $e');
       isPlaying = false;
       notifyListeners();
-      rethrow;
     } finally {
       _isOperationInProgress = false;
     }
   }
 
   Future<void> stop() async {
-    // Use safe stop
     await _safeStop();
     isPlaying = false;
     position = Duration.zero;
@@ -292,63 +201,24 @@ class AudioService extends ChangeNotifier {
   }
 
   Future<void> seek(Duration pos) async {
-    // Prevent seeking during other operations
-    if (_isOperationInProgress || isLoading) {
-      debugPrint('⏳ Busy, ignoring seek');
-      return;
-    }
-
+    if (isLoading) return;
     try {
-      // Seek with timeout
-      await _player.seek(pos).timeout(
-        Duration(seconds: 1),
-        onTimeout: () {
-          debugPrint('⚠️ Seek timed out');
-          // Update position anyway for UI consistency
-          position = pos;
-        },
-      );
-      
+      await _player.seek(pos);
       position = pos;
       notifyListeners();
-      
     } catch (e) {
       debugPrint('⚠️ Seek error: $e');
-      // Don't throw - seeking errors shouldn't break the app
       position = pos;
       notifyListeners();
     }
   }
 
-  // NEW: Safe disposal method
-  Future<void> disposePlayer() async {
-    debugPrint('🔄 Disposing AudioService...');
-    
-    // Cancel subscriptions first (fast operation)
-    await _posSub?.cancel();
-    await _durSub?.cancel();
-    await _compSub?.cancel();
-    await _stateSub?.cancel();
+  bool get canPlay => !isLoading && !_isOperationInProgress;
 
-    // Don't await player disposal - let it happen in background
-    // This prevents ANRs during app closure
-    _player.dispose().then((_) {
-      debugPrint('✅ Player disposed successfully');
-    }).catchError((e) {
-      debugPrint('⚠️ Player disposal error (non-blocking): $e');
-    });
-  }
+  // ─────────────────────────────────────────────────────────────────────────
+  // Foreground Azan Controls (unchanged)
+  // ─────────────────────────────────────────────────────────────────────────
 
-  @override
-  void dispose() {
-    // Fire and forget - don't block disposal
-    disposePlayer();
-    super.dispose();
-  }
-
-  // ------------------------------
-  // Foreground Azan Controls
-  // ------------------------------
   static Future<void> playAzan({String prayerName = "Azan"}) async {
     try {
       debugPrint('🕌 Starting Foreground Azan...');
@@ -367,9 +237,15 @@ class AudioService extends ChangeNotifier {
     }
   }
 
-  // NEW: Helper to check if player is in a good state
-  bool get canPlay => !isLoading && !_isOperationInProgress;
-  
-  // NEW: Helper to get current player state
-  PlayerState get playerState => _player.state;
+  // ─────────────────────────────────────────────────────────────────────────
+
+  @override
+  void dispose() {
+    _posSub?.cancel();
+    _durSub?.cancel();
+    _stateSub?.cancel();
+    _processingStateSub?.cancel();
+    _player.dispose();
+    super.dispose();
+  }
 }
