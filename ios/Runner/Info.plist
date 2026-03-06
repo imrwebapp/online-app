@@ -37,6 +37,9 @@
 	<!-- Launch Screen -->
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
+	<!-- 🎙️ Required by AVFoundation (used by just_audio) — app does not record -->
+<key>NSMicrophoneUsageDescription</key>
+<string>This app does not use the microphone. This is required by the audio framework.</string>
 
 	<key>UIMainStoryboardFile</key>
 	<string>Main</string>
