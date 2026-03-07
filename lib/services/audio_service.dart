@@ -5,7 +5,7 @@ import 'package:just_audio/just_audio.dart';
 import '../models/surah.dart';
 import 'azan_foreground_service.dart';
 import 'audio_download_service.dart';
-import '../screens/debug_log_screen.dart'; // ← AppLogger
+import '../screens/debug_log_screen.dart';
 
 class AudioService extends ChangeNotifier {
   final AudioPlayer _player = AudioPlayer();
@@ -16,6 +16,9 @@ class AudioService extends ChangeNotifier {
   bool isLoading = false;
   Duration duration = Duration.zero;
   Duration position = Duration.zero;
+
+  // True while we're using an estimated duration (not yet confirmed by AVPlayer)
+  bool isDurationEstimated = false;
 
   StreamSubscription<Duration>? _posSub;
   StreamSubscription<Duration?>? _durSub;
@@ -64,6 +67,11 @@ class AudioService extends ChangeNotifier {
     _durSub = _player.durationStream.listen((d) {
       _log('durationStream: $d');
       if (d != null && d > Duration.zero) {
+        // AVPlayer now knows the real duration — replace our estimate
+        if (isDurationEstimated) {
+          _log('✅ replacing estimated duration ($duration) with real duration ($d)');
+          isDurationEstimated = false;
+        }
         duration = d;
         notifyListeners();
       }
@@ -102,6 +110,7 @@ class AudioService extends ChangeNotifier {
     currentSurah = s;
     position = Duration.zero;
     duration = Duration.zero;
+    isDurationEstimated = false;
     notifyListeners();
 
     if (autoplay) await _loadAndPlay();
@@ -155,6 +164,21 @@ class AudioService extends ChangeNotifier {
         _log('calling getAudioSource...');
         source = await downloadService!.getAudioSource(currentSurah!);
         _log('✅ getAudioSource → ${source.runtimeType}');
+
+        // ── Seed estimated duration immediately ──────────────────────────
+        // For progressive streams, AVPlayer won't know duration until the
+        // full file is downloaded. We computed it from the MP3 header, so
+        // show it right away so the UI displays "45:23" instead of "0:00".
+        final estimated = downloadService!.estimatedDuration;
+        if (estimated != null && estimated > Duration.zero) {
+          duration = estimated;
+          isDurationEstimated = true;
+          final mm = estimated.inMinutes.toString().padLeft(2, '0');
+          final ss = (estimated.inSeconds % 60).toString().padLeft(2, '0');
+          _log('⏱ seeding estimated duration: $mm:$ss');
+          notifyListeners();
+        }
+        // ────────────────────────────────────────────────────────────────
       } else {
         final p = 'assets/audios/${currentSurah!.audioAsset}';
         _log('asset fallback: $p');
@@ -165,6 +189,14 @@ class AudioService extends ChangeNotifier {
       await _player.setAudioSource(source);
       _log('✅ setAudioSource done — ps=${_player.processingState.name}  dur=${_player.duration}');
 
+      // If AVPlayer already reported a real duration, use it and clear estimate
+      if (_player.duration != null && _player.duration! > Duration.zero) {
+        duration = _player.duration!;
+        isDurationEstimated = false;
+        _log('✅ AVPlayer duration available immediately: $duration');
+        notifyListeners();
+      }
+
       _log('calling _player.play()...');
       await _player.play();
       _log('✅ _player.play() returned — playing=${_player.playing}');
@@ -173,6 +205,7 @@ class AudioService extends ChangeNotifier {
       _log('   $st');
       isLoading = false;
       isPlaying = false;
+      isDurationEstimated = false;
       notifyListeners();
     } finally {
       _isLoadingSource = false;
