@@ -13,24 +13,33 @@ import '../screens/debug_log_screen.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // _ProgressiveStream
+//
+// Represents one in-progress download. Notifies waiters as bytes arrive.
 // ─────────────────────────────────────────────────────────────────────────────
 class _ProgressiveStream {
+  final int surahNumber;
   final String tempPath;
   final int totalBytes;
+
   int _writtenBytes = 0;
   bool _downloadComplete = false;
+  bool _cancelled = false;
   bool _failed = false;
 
   final _dataController = StreamController<void>.broadcast();
 
   _ProgressiveStream({
+    required this.surahNumber,
     required this.tempPath,
     required this.totalBytes,
   });
 
   int get writtenBytes => _writtenBytes;
   bool get downloadComplete => _downloadComplete;
+  bool get cancelled => _cancelled;
   bool get failed => _failed;
+  bool get done => _downloadComplete || _cancelled || _failed;
+
   double get progress =>
       totalBytes > 0 ? (_writtenBytes / totalBytes).clamp(0.0, 1.0) : 0.0;
 
@@ -47,15 +56,21 @@ class _ProgressiveStream {
     }
   }
 
+  void cancel() {
+    _cancelled = true;
+    if (!_dataController.isClosed) _dataController.close();
+  }
+
   void onError() {
     _failed = true;
     if (!_dataController.isClosed) _dataController.close();
   }
 
+  /// Wait until [needed] bytes are on disk, or stream ends for any reason.
   Future<void> waitForBytes(int needed) async {
-    if (_writtenBytes >= needed || _downloadComplete || _failed) return;
+    if (_writtenBytes >= needed || done) return;
     await for (final _ in _dataController.stream) {
-      if (_writtenBytes >= needed || _downloadComplete || _failed) return;
+      if (_writtenBytes >= needed || done) return;
     }
   }
 
@@ -66,12 +81,6 @@ class _ProgressiveStream {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Mp3DurationEstimator
-//
-// Reads the first valid MP3 frame header to detect bitrate, then:
-//   duration = fileSizeBytes / (bitrateKbps * 1000 / 8)
-//
-// For VBR files, reads the Xing/Info header for an exact frame count.
-// Accurate to ~1% for CBR (all standard Quran recitation audio is CBR).
 // ─────────────────────────────────────────────────────────────────────────────
 class Mp3DurationEstimator {
   static const _bitratesKbps = [
@@ -82,7 +91,6 @@ class Mp3DurationEstimator {
   static Duration? estimate(List<int> headerBytes, int totalFileBytes) {
     if (totalFileBytes <= 0 || headerBytes.length < 10) return null;
 
-    // Skip ID3v2 tag if present
     int offset = 0;
     if (headerBytes[0] == 0x49 && headerBytes[1] == 0x44 && headerBytes[2] == 0x33) {
       final id3Size = ((headerBytes[6] & 0x7F) << 21) |
@@ -92,7 +100,6 @@ class Mp3DurationEstimator {
       offset = 10 + id3Size;
     }
 
-    // Scan for MP3 sync word
     for (int i = offset; i < headerBytes.length - 4; i++) {
       if (headerBytes[i] != 0xFF || (headerBytes[i + 1] & 0xE0) != 0xE0) continue;
 
@@ -107,10 +114,11 @@ class Mp3DurationEstimator {
       final sampleRate = _sampleRates[sampleRateIndex];
       if (bitrateKbps <= 0 || sampleRate <= 0) continue;
 
-      // Check for Xing/Info VBR header (stereo MPEG1 Layer3: side info = 32 bytes)
+      // Check for Xing/Info VBR header
       final xingOffset = i + 4 + 32;
       if (xingOffset + 16 < headerBytes.length) {
-        final tag = String.fromCharCodes(headerBytes.sublist(xingOffset, xingOffset + 4));
+        final tag = String.fromCharCodes(
+            headerBytes.sublist(xingOffset, xingOffset + 4));
         if (tag == 'Xing' || tag == 'Info') {
           final flags = (headerBytes[xingOffset + 4] << 24) |
               (headerBytes[xingOffset + 5] << 16) |
@@ -122,17 +130,17 @@ class Mp3DurationEstimator {
                 (headerBytes[xingOffset + 10] << 8) |
                 headerBytes[xingOffset + 11];
             if (totalFrames > 0) {
-              final durationMs = (totalFrames * 1152 * 1000) ~/ sampleRate;
-              return Duration(milliseconds: durationMs);
+              return Duration(
+                  milliseconds: (totalFrames * 1152 * 1000) ~/ sampleRate);
             }
           }
         }
       }
 
-      // CBR: duration = fileSize / bytesPerSecond
+      // CBR fallback
       final bytesPerSecond = (bitrateKbps * 1000) ~/ 8;
-      final durationMs = (totalFileBytes * 1000) ~/ bytesPerSecond;
-      return Duration(milliseconds: durationMs);
+      return Duration(
+          milliseconds: (totalFileBytes * 1000) ~/ bytesPerSecond);
     }
     return null;
   }
@@ -145,15 +153,24 @@ class AudioDownloadService extends ChangeNotifier {
   static const String _baseUrl =
       'https://github.com/aounrshah/audio-files/releases/download/v1.0';
 
+  // Max completed temp files to keep on disk (LRU eviction).
+  // Each surah is ~10–40 MB, so 5 = up to ~200 MB of temp cache.
+  static const int _maxTempCached = 5;
+
+  // ── Proxy server ──────────────────────────────────────────────────────────
   HttpServer? _proxyServer;
   int _proxyPort = 0;
 
+  // Only ONE active progressive stream at a time (the currently playing surah).
+  // When user switches surah, the old stream is cancelled and cleaned up.
   _ProgressiveStream? _activeStream;
-  int? _activeStreamSurahNumber;
 
-  /// Populated by getAudioSource() for streaming surahs.
-  /// Your AudioService should read this immediately after getAudioSource()
-  /// returns and use it as the display duration until AVPlayer reports its own.
+  // LRU list of surah numbers whose temp files are complete and on disk.
+  // Most-recently-used is at the end.
+  final List<int> _tempCacheLru = [];
+
+  /// Estimated duration for the current progressive stream.
+  /// Read by AudioService immediately after getAudioSource() returns.
   Duration? estimatedDuration;
 
   Map<int, double> downloadProgress = {};
@@ -177,7 +194,8 @@ class AudioDownloadService extends ChangeNotifier {
 
   Future<void> _startProxyServer() async {
     final handler = const shelf.Pipeline().addHandler(_handleProxyRequest);
-    _proxyServer = await shelf_io.serve(handler, InternetAddress.loopbackIPv4, 0);
+    _proxyServer =
+        await shelf_io.serve(handler, InternetAddress.loopbackIPv4, 0);
     _proxyPort = _proxyServer!.port;
     _log('✅ proxy server on port $_proxyPort');
   }
@@ -188,6 +206,7 @@ class AudioDownloadService extends ChangeNotifier {
       return shelf.Response.internalServerError(body: 'No active stream');
     }
 
+    // Parse Range header
     int start = 0;
     int? end;
     final rangeHeader = request.headers['range'];
@@ -201,19 +220,27 @@ class AudioDownloadService extends ChangeNotifier {
     }
 
     final total = stream.totalBytes;
-    final effectiveEnd = end ?? (total > 0 ? total - 1 : null);
-    final needed = effectiveEnd != null ? effectiveEnd + 1 : start + 1;
 
-    await stream.waitForBytes(needed);
+    // Only wait until `start` is available — never block on `end`.
+    // AVPlayer re-requests remaining bytes via follow-up range requests.
+    await stream.waitForBytes(start + 1);
+
+    if (stream.cancelled) {
+      // User switched surah — tell AVPlayer this stream ended cleanly
+      return shelf.Response(416, body: 'Stream cancelled');
+    }
     if (stream.failed) {
       return shelf.Response.internalServerError(body: 'Download failed');
     }
 
     final available = stream.writtenBytes;
-    final readEnd = effectiveEnd != null
-        ? effectiveEnd.clamp(0, available - 1)
-        : available - 1;
-    final length = readEnd - start + 1;
+
+    // Serve at most 512 KB per response — keeps AVPlayer from waiting
+    const maxChunk = 512 * 1024;
+    final requestedEnd = end ?? (start + maxChunk - 1);
+    final serveEnd = requestedEnd.clamp(start, available - 1);
+    final chunkEnd = serveEnd.clamp(start, start + maxChunk - 1);
+    final length = chunkEnd - start + 1;
 
     if (length <= 0) return shelf.Response(416, body: 'Range Not Satisfiable');
 
@@ -227,11 +254,11 @@ class AudioDownloadService extends ChangeNotifier {
       'Accept-Ranges': 'bytes',
       'Content-Length': '$length',
       'Content-Range': total > 0
-          ? 'bytes $start-$readEnd/$total'
-          : 'bytes $start-$readEnd/*',
+          ? 'bytes $start-$chunkEnd/$total'
+          : 'bytes $start-$chunkEnd/*',
     };
 
-    _log('proxy: bytes $start–$readEnd / ${total > 0 ? total : "?"}');
+    _log('proxy: $start–$chunkEnd / ${total > 0 ? total : "?"}  (avail=$available)');
     return shelf.Response(206, body: bytes, headers: headers);
   }
 
@@ -264,55 +291,76 @@ class AudioDownloadService extends ChangeNotifier {
   }
 
   // ── Core: getAudioSource ─────────────────────────────────────────────────
+  //
+  // Call this every time the user selects a surah. It:
+  //   1. Returns a local file source immediately for downloaded surahs
+  //   2. Cancels any in-progress stream for a different surah
+  //   3. Reuses a cached temp file if available (LRU)
+  //   4. Otherwise starts a fresh progressive download and streams via proxy
 
   Future<AudioSource> getAudioSource(Surah surah) async {
     _log('getAudioSource: ${surah.nameEn}');
     estimatedDuration = null;
 
-    // 1. Permanently downloaded
+    // 1. Permanently downloaded — best path, always instant
     final permPath = await _permanentPath(surah.audioAsset);
     if (await File(permPath).exists()) {
       _log('✅ permanent file → AudioSource.file');
+      // Cancel any unrelated active stream to free resources
+      await _cancelActiveStreamIfDifferent(surah.number);
       return AudioSource.file(permPath);
     }
 
-    // 2. Fully cached temp from a previous session
+    // 2. Cancel active stream if it's a different surah
+    await _cancelActiveStreamIfDifferent(surah.number);
+
+    // 3. Completed temp file in LRU cache — play immediately, no proxy needed
     final tmpPath = await _tempPath(surah.audioAsset);
-    final tmpFile = File(tmpPath);
-    if (await tmpFile.exists() &&
-        _activeStreamSurahNumber != surah.number &&
-        (await tmpFile.length()) > 0) {
-      _log('✅ cached temp file → AudioSource.file');
+    if (_tempCacheLru.contains(surah.number) &&
+        await File(tmpPath).exists()) {
+      _log('✅ LRU cache hit → AudioSource.file');
+      _touchLru(surah.number); // move to most-recently-used
       return AudioSource.file(tmpPath);
     }
 
-    // 3. Start progressive download
-    if (_activeStreamSurahNumber != surah.number) {
-      await _startProgressiveDownload(surah, tmpPath);
+    // 4. Same surah already streaming — reuse existing proxy stream
+    if (_activeStream != null &&
+        _activeStream!.surahNumber == surah.number &&
+        !_activeStream!.done) {
+      _log('reusing existing active stream for ${surah.nameEn}');
+      return _buildProxySource(surah, tmpPath);
     }
 
-    // Wait for 128 KB initial buffer
-    const initialBuffer = 128 * 1024;
+    // 5. Start fresh progressive download
+    await _startProgressiveDownload(surah, tmpPath);
+    return _buildProxySource(surah, tmpPath);
+  }
+
+  /// Waits for initial buffer, estimates duration, returns proxy AudioSource.
+  Future<AudioSource> _buildProxySource(Surah surah, String tmpPath) async {
+    const initialBuffer = 128 * 1024; // 128 KB
     _log('⏳ waiting for ${initialBuffer ~/ 1024} KB buffer...');
     await _activeStream!.waitForBytes(initialBuffer);
 
+    if (_activeStream!.cancelled) {
+      throw Exception('Stream cancelled before buffer was ready');
+    }
     if (_activeStream!.failed) {
-      throw Exception('Progressive download failed during initial buffer');
+      throw Exception('Stream failed before buffer was ready');
     }
 
-    // ── Estimate duration from buffered header bytes ──────────────────────
+    // Estimate duration from MP3 header bytes
     try {
       final raf = await File(tmpPath).open();
-      final headerBytes = await raf.read(65536); // read first 64 KB
+      final headerBytes = await raf.read(65536);
       await raf.close();
-      final dur = Mp3DurationEstimator.estimate(headerBytes, _activeStream!.totalBytes);
+      final dur = Mp3DurationEstimator.estimate(
+          headerBytes, _activeStream!.totalBytes);
       if (dur != null) {
         estimatedDuration = dur;
         final mm = dur.inMinutes.toString().padLeft(2, '0');
         final ss = (dur.inSeconds % 60).toString().padLeft(2, '0');
         _log('✅ estimated duration: $mm:$ss');
-      } else {
-        _log('⚠️ could not estimate duration from MP3 header');
       }
     } catch (e) {
       _log('duration estimate error: $e');
@@ -325,14 +373,28 @@ class AudioDownloadService extends ChangeNotifier {
     );
   }
 
-  // ── Progressive background download ───────────────────────────────────────
+  // ── Stream lifecycle ──────────────────────────────────────────────────────
+
+  Future<void> _cancelActiveStreamIfDifferent(int surahNumber) async {
+    if (_activeStream == null) return;
+    if (_activeStream!.surahNumber == surahNumber) return;
+
+    _log('cancelling active stream for surah #${_activeStream!.surahNumber}');
+    final old = _activeStream!;
+    _activeStream = null;
+    old.cancel();
+    await old.dispose();
+
+    // Delete incomplete temp file to avoid partial files being played later
+    final file = File(old.tempPath);
+    if (await file.exists() && !old.downloadComplete) {
+      await file.delete();
+      _log('🗑 deleted incomplete temp file');
+    }
+  }
 
   Future<void> _startProgressiveDownload(Surah surah, String tmpPath) async {
     _log('starting progressive download: ${surah.nameEn}');
-
-    await _activeStream?.dispose();
-    _activeStream = null;
-    _activeStreamSurahNumber = null;
 
     final tmpFile = File(tmpPath);
     if (await tmpFile.exists()) await tmpFile.delete();
@@ -354,10 +416,14 @@ class AudioDownloadService extends ChangeNotifier {
     final totalBytes = response.contentLength ?? 0;
     _log('file size: ${totalBytes > 0 ? "${(totalBytes / 1024 / 1024).toStringAsFixed(2)} MB" : "unknown"}');
 
-    final stream = _ProgressiveStream(tempPath: tmpPath, totalBytes: totalBytes);
+    final stream = _ProgressiveStream(
+      surahNumber: surah.number,
+      tempPath: tmpPath,
+      totalBytes: totalBytes,
+    );
     _activeStream = stream;
-    _activeStreamSurahNumber = surah.number;
 
+    // Run download in background — does not block playback
     _downloadInBackground(surah, stream, response, tmpPath, totalBytes);
   }
 
@@ -372,6 +438,11 @@ class AudioDownloadService extends ChangeNotifier {
     int received = 0;
     try {
       await for (final chunk in response.stream) {
+        // Stop writing if the stream was cancelled (user switched surah)
+        if (stream.cancelled) {
+          _log('background download cancelled: ${surah.nameEn}');
+          break;
+        }
         sink.add(chunk);
         received += chunk.length;
         stream.onChunkWritten(chunk.length);
@@ -382,14 +453,57 @@ class AudioDownloadService extends ChangeNotifier {
       }
       await sink.flush();
       await sink.close();
-      stream.onComplete();
-      downloadProgress[surah.number] = 1.0;
-      _log('✅ download complete: ${(received / 1024 / 1024).toStringAsFixed(2)} MB');
-      notifyListeners();
+
+      if (!stream.cancelled) {
+        stream.onComplete();
+        downloadProgress[surah.number] = 1.0;
+        _log('✅ download complete: ${surah.nameEn} (${(received / 1024 / 1024).toStringAsFixed(2)} MB)');
+        // Add to LRU cache since the temp file is now complete
+        _addToLru(surah.number);
+        notifyListeners();
+      }
     } catch (e, st) {
       await sink.close();
-      stream.onError();
-      _log('❌ background download error: $e\n$st');
+      if (!stream.cancelled) {
+        stream.onError();
+        _log('❌ background download error: $e\n$st');
+      }
+    }
+  }
+
+  // ── LRU temp cache management ─────────────────────────────────────────────
+  //
+  // Keeps the last _maxTempCached completed temp files on disk.
+  // When the limit is exceeded, the least-recently-used file is deleted.
+  // Permanently downloaded surahs are never in this cache.
+
+  void _addToLru(int surahNumber) {
+    _tempCacheLru.remove(surahNumber);
+    _tempCacheLru.add(surahNumber); // most-recently-used at the end
+    _log('LRU cache: added surah #$surahNumber  (size=${_tempCacheLru.length})');
+    _evictLruIfNeeded();
+  }
+
+  void _touchLru(int surahNumber) {
+    _tempCacheLru.remove(surahNumber);
+    _tempCacheLru.add(surahNumber);
+  }
+
+  void _evictLruIfNeeded() {
+    while (_tempCacheLru.length > _maxTempCached) {
+      final evict = _tempCacheLru.removeAt(0); // least-recently-used
+      _deleteTempFile(evict);
+      _log('LRU evicted surah #$evict');
+    }
+  }
+
+  void _deleteTempFile(int surahNumber) async {
+    try {
+      final surah = surahs.firstWhere((s) => s.number == surahNumber);
+      final file = File(await _tempPath(surah.audioAsset));
+      if (await file.exists()) await file.delete();
+    } catch (e) {
+      _log('_deleteTempFile error: $e');
     }
   }
 
@@ -425,7 +539,7 @@ class AudioDownloadService extends ChangeNotifier {
     return url;
   }
 
-  // ── Explicit Download ─────────────────────────────────────────────────────
+  // ── Explicit Download (Download button) ───────────────────────────────────
 
   Future<bool> downloadSurah(Surah surah) async {
     _log('downloadSurah: ${surah.nameEn}');
@@ -439,34 +553,42 @@ class AudioDownloadService extends ChangeNotifier {
       return true;
     }
 
-    // Piggyback on active progressive stream
-    if (_activeStreamSurahNumber == surah.number && _activeStream != null) {
+    // If this surah is actively streaming, wait for it to complete then promote
+    if (_activeStream != null &&
+        _activeStream!.surahNumber == surah.number &&
+        !_activeStream!.done) {
       _log('piggybacking on active stream...');
       final stream = _activeStream!;
       isDownloading[surah.number] = true;
       notifyListeners();
 
+      // Wait for completion
       if (stream.totalBytes > 0) {
         await stream.waitForBytes(stream.totalBytes);
       } else {
-        while (!stream.downloadComplete && !stream.failed) {
-          await Future.delayed(const Duration(milliseconds: 200));
+        while (!stream.done) {
+          await Future.delayed(const Duration(milliseconds: 300));
         }
       }
 
-      if (!stream.failed && await File(stream.tempPath).exists()) {
-        await File(stream.tempPath).copy(localPath);
-        await File(stream.tempPath).delete();
-        _log('✅ promoted temp → permanent');
-        downloadedSurahs.add(surah.number);
-        await _saveDownloadedList();
-        isDownloading[surah.number] = false;
-        downloadProgress[surah.number] = 1.0;
-        notifyListeners();
-        return true;
+      if (stream.downloadComplete) {
+        final tmpPath = stream.tempPath;
+        if (await File(tmpPath).exists()) {
+          await File(tmpPath).copy(localPath);
+          await File(tmpPath).delete();
+          _tempCacheLru.remove(surah.number); // no longer a temp file
+          _log('✅ promoted temp → permanent');
+          downloadedSurahs.add(surah.number);
+          await _saveDownloadedList();
+          isDownloading[surah.number] = false;
+          downloadProgress[surah.number] = 1.0;
+          notifyListeners();
+          return true;
+        }
       }
     }
 
+    // Fresh standalone download
     try {
       isDownloading[surah.number] = true;
       downloadProgress[surah.number] = 0.0;
@@ -500,8 +622,10 @@ class AudioDownloadService extends ChangeNotifier {
       await sink.flush();
       await sink.close();
 
+      // Clean up temp file if it exists
       final tmpFile = File(await _tempPath(surah.audioAsset));
       if (await tmpFile.exists()) await tmpFile.delete();
+      _tempCacheLru.remove(surah.number);
 
       _log('✅ saved ${(received / 1024 / 1024).toStringAsFixed(2)} MB');
       downloadedSurahs.add(surah.number);
@@ -523,8 +647,11 @@ class AudioDownloadService extends ChangeNotifier {
     try {
       final permFile = File(await _permanentPath(surah.audioAsset));
       if (await permFile.exists()) await permFile.delete();
+
       final tmpFile = File(await _tempPath(surah.audioAsset));
       if (await tmpFile.exists()) await tmpFile.delete();
+      _tempCacheLru.remove(surah.number);
+
       downloadedSurahs.remove(surah.number);
       await _saveDownloadedList();
       notifyListeners();
@@ -570,12 +697,17 @@ class AudioDownloadService extends ChangeNotifier {
     }
   }
 
+  /// Call on app startup to clean up any leftover temp files from a
+  /// previous session that wasn't cleanly shut down.
   Future<void> clearTempFiles() async {
     final dir = await getTemporaryDirectory();
     try {
-      final files = dir.listSync().whereType<File>()
+      final files = dir
+          .listSync()
+          .whereType<File>()
           .where((f) => f.path.contains('stream_'));
       for (final f in files) await f.delete();
+      _tempCacheLru.clear();
       _log('🧹 cleared temp stream files');
     } catch (e) {
       _log('clearTempFiles error: $e');
@@ -584,6 +716,7 @@ class AudioDownloadService extends ChangeNotifier {
 
   @override
   void dispose() {
+    _activeStream?.cancel();
     _activeStream?.dispose();
     _proxyServer?.close();
     super.dispose();
