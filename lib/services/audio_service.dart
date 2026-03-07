@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:audio_session/audio_session.dart';
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
 import '../models/surah.dart';
@@ -18,222 +19,227 @@ class AudioService extends ChangeNotifier {
   StreamSubscription<Duration>? _posSub;
   StreamSubscription<Duration?>? _durSub;
   StreamSubscription<PlayerState>? _stateSub;
-  StreamSubscription<ProcessingState>? _processingStateSub;
 
-  bool _isOperationInProgress = false;
+  // Guards against concurrent load calls only — NOT against play/pause
+  bool _isLoadingSource = false;
 
   AudioService({this.downloadService}) {
+    _initAudioSession();
     _setupListeners();
   }
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // AUDIO SESSION
+  // Required on iOS so AVAudioSession is set to .playback category.
+  // Without this, audio silently fails when the device ring/silent switch
+  // is set to silent, or when the screen is locked.
+  // ─────────────────────────────────────────────────────────────────────────
+  Future<void> _initAudioSession() async {
+    try {
+      final session = await AudioSession.instance;
+      await session.configure(const AudioSessionConfiguration(
+        avAudioSessionCategory: AVAudioSessionCategory.playback,
+        avAudioSessionCategoryOptions: AVAudioSessionCategoryOptions.none,
+        avAudioSessionMode: AVAudioSessionMode.defaultMode,
+        avAudioSessionRouteSharingPolicy:
+            AVAudioSessionRouteSharingPolicy.defaultPolicy,
+        avAudioSessionSetActiveOptions: AVAudioSessionSetActiveOptions.none,
+        androidAudioAttributes: AndroidAudioAttributes(
+          contentType: AndroidAudioContentType.music,
+          usage: AndroidAudioUsage.media,
+        ),
+        androidAudioFocusGainType: AndroidAudioFocusGainType.gain,
+        androidWillPauseWhenDucked: true,
+      ));
+      debugPrint('✅ AudioSession configured');
+    } catch (e) {
+      debugPrint('⚠️ AudioSession config failed (non-critical): $e');
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // LISTENERS
+  // ─────────────────────────────────────────────────────────────────────────
   void _setupListeners() {
-    // Position updates
     _posSub = _player.positionStream.listen((p) {
       position = p;
       notifyListeners();
     });
 
-    // Duration updates
     _durSub = _player.durationStream.listen((d) {
-      duration = d ?? Duration.zero;
-      notifyListeners();
+      if (d != null && d > Duration.zero) {
+        duration = d;
+        notifyListeners();
+      }
     });
 
-    // Playing state updates
     _stateSub = _player.playerStateStream.listen((state) {
-      final wasPlaying = isPlaying;
-
-      // completed → reset position
       if (state.processingState == ProcessingState.completed) {
         isPlaying = false;
         position = duration;
         notifyListeners();
         return;
       }
-
-      isPlaying = state.playing;
-      if (wasPlaying != isPlaying) notifyListeners();
+      final playing = state.playing;
+      if (playing != isPlaying) {
+        isPlaying = playing;
+        notifyListeners();
+      }
     });
   }
 
   // ─────────────────────────────────────────────────────────────────────────
+  // PUBLIC API
+  // ─────────────────────────────────────────────────────────────────────────
 
+  /// Load a new surah and optionally start playing.
+  /// Safe to call from UI — will not deadlock.
   Future<void> setSurahAndPlay(Surah s, {bool autoplay = true}) async {
-    if (_isOperationInProgress) {
-      debugPrint('⏳ Operation in progress, ignoring request');
+    final isSameSurah = currentSurah?.number == s.number;
+
+    if (isSameSurah) {
+      // Same surah — just resume/play if autoplay requested
+      if (autoplay && !_player.playing) {
+        await play();
+      }
       return;
     }
-    _isOperationInProgress = true;
 
-    try {
-      if (currentSurah?.number != s.number) {
-        await _safeStop();
-        currentSurah = s;
-        position = Duration.zero;
-        duration = Duration.zero;
-        notifyListeners();
-      }
+    // Different surah — stop current, load new one
+    await _safeStop();
+    currentSurah = s;
+    position = Duration.zero;
+    duration = Duration.zero;
+    notifyListeners();
 
-      if (autoplay) await play();
-    } catch (e) {
-      debugPrint('❌ setSurahAndPlay error: $e');
-    } finally {
-      _isOperationInProgress = false;
+    if (autoplay) {
+      await _loadAndPlay();
     }
   }
 
-  Future<void> _safeStop() async {
-    try {
-      await _player.stop().timeout(
-        const Duration(seconds: 2),
-        onTimeout: () {
-          debugPrint('⚠️ Stop timed out');
-          isPlaying = false;
-          position = Duration.zero;
-        },
-      );
-    } catch (e) {
-      debugPrint('⚠️ Stop error (non-blocking): $e');
-      isPlaying = false;
-      position = Duration.zero;
-    }
-  }
-
+  /// Resume or start playback of the current surah.
   Future<void> play() async {
-    if (isLoading || _isOperationInProgress) {
-      debugPrint('⏳ Busy, ignoring play');
-      return;
-    }
-    if (currentSurah == null) {
-      debugPrint('⚠️ No surah selected');
+    if (currentSurah == null) return;
+
+    // Already playing — nothing to do
+    if (_player.playing) return;
+
+    // Source is loaded and ready — just resume
+    if (_player.processingState == ProcessingState.ready) {
+      await _player.play();
       return;
     }
 
-    _isOperationInProgress = true;
+    // Source not loaded yet — load then play
+    await _loadAndPlay();
+  }
+
+  /// Load the audio source for [currentSurah] and start playback.
+  /// Uses a simple boolean guard to prevent duplicate concurrent loads.
+  Future<void> _loadAndPlay() async {
+    if (_isLoadingSource) {
+      debugPrint('⏳ Already loading source, ignoring duplicate request');
+      return;
+    }
+    if (currentSurah == null) return;
+
+    _isLoadingSource = true;
+    isLoading = true;
+    notifyListeners();
 
     try {
-      // Already playing
-      if (_player.playing) {
-        isPlaying = true;
-        notifyListeners();
-        return;
-      }
-
-      // Paused → resume without re-loading source
-      if (_player.processingState == ProcessingState.ready &&
-          !_player.playing) {
-        debugPrint('▶️ Resuming');
-        await _player.play();
-        isPlaying = true;
-        notifyListeners();
-        return;
-      }
-
-      // New playback — load source
-      isLoading = true;
-      notifyListeners();
+      AudioSource source;
 
       if (downloadService != null) {
-        final source = await downloadService!
-            .getAudioSource(currentSurah!)
-            .timeout(
-              const Duration(seconds: 10),
-              onTimeout: () => throw TimeoutException('getAudioSource timed out'),
-            );
-
-        debugPrint('🎵 Setting audio source...');
-        await _player.setAudioSource(source);
-        await _player.play();
+        source = await downloadService!.getAudioSource(currentSurah!);
       } else {
-        // Fallback: bundled asset
-        final assetPath = 'assets/audios/${currentSurah!.audioAsset}';
-        debugPrint('📦 Playing asset: $assetPath');
-        await _player.setAudioSource(AudioSource.asset(assetPath));
-        await _player.play();
+        source = AudioSource.asset('assets/audios/${currentSurah!.audioAsset}');
       }
 
-      isPlaying = true;
+      debugPrint('🎵 setAudioSource: ${currentSurah!.nameEn}');
+
+      // setAudioSource resolves the duration and prepares the decoder.
+      // For LockCachingAudioSource this also starts the local proxy.
+      final loadedDuration = await _player.setAudioSource(
+        source,
+        preload: true,  // preload=true so duration is known before play()
+      );
+
+      if (loadedDuration != null && loadedDuration > Duration.zero) {
+        duration = loadedDuration;
+        debugPrint('⏱ Duration: $duration');
+      }
+
       isLoading = false;
       notifyListeners();
-      debugPrint('✅ Playback started: ${currentSurah!.nameEn}');
-    } on TimeoutException catch (e) {
-      debugPrint('⏱️ Play timeout: $e');
-      isPlaying = false;
-      isLoading = false;
-      notifyListeners();
+
+      await _player.play();
+      debugPrint('▶️ Playback started: ${currentSurah!.nameEn}');
     } catch (e) {
-      debugPrint('❌ Play error: $e');
-      isPlaying = false;
+      debugPrint('❌ _loadAndPlay error: $e');
       isLoading = false;
+      isPlaying = false;
       notifyListeners();
     } finally {
-      _isOperationInProgress = false;
+      _isLoadingSource = false;
     }
   }
 
   Future<void> pause() async {
-    if (_isOperationInProgress) return;
-    _isOperationInProgress = true;
-
     try {
-      await _player.pause().timeout(
-        const Duration(seconds: 2),
-        onTimeout: () {
-          isPlaying = false;
-        },
-      );
-      isPlaying = false;
-      notifyListeners();
+      await _player.pause();
     } catch (e) {
-      debugPrint('❌ Pause error: $e');
+      debugPrint('⚠️ Pause error: $e');
       isPlaying = false;
       notifyListeners();
-    } finally {
-      _isOperationInProgress = false;
     }
   }
 
   Future<void> stop() async {
     await _safeStop();
-    isPlaying = false;
-    position = Duration.zero;
-    notifyListeners();
   }
 
   Future<void> seek(Duration pos) async {
     if (isLoading) return;
     try {
       await _player.seek(pos);
-      position = pos;
-      notifyListeners();
     } catch (e) {
       debugPrint('⚠️ Seek error: $e');
-      position = pos;
-      notifyListeners();
     }
   }
 
-  bool get canPlay => !isLoading && !_isOperationInProgress;
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // Foreground Azan Controls (unchanged)
-  // ─────────────────────────────────────────────────────────────────────────
-
-  static Future<void> playAzan({String prayerName = "Azan"}) async {
+  Future<void> _safeStop() async {
     try {
-      debugPrint('🕌 Starting Foreground Azan...');
+      await _player.stop();
+      isPlaying = false;
+      position = Duration.zero;
+      notifyListeners();
+    } catch (e) {
+      debugPrint('⚠️ Stop error: $e');
+      isPlaying = false;
+      position = Duration.zero;
+    }
+  }
+
+  bool get canPlay => !isLoading && !_isLoadingSource;
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // AZAN (unchanged)
+  // ─────────────────────────────────────────────────────────────────────────
+
+  static Future<void> playAzan({String prayerName = 'Azan'}) async {
+    try {
       await AzanForegroundService.startForegroundAzan(prayerName: prayerName);
     } catch (e, st) {
-      debugPrint('❌ Error playing Azan: $e\n$st');
+      debugPrint('❌ playAzan error: $e\n$st');
     }
   }
 
   static Future<void> stopAzan() async {
     try {
-      debugPrint('🛑 Stopping Foreground Azan...');
       await AzanForegroundService.stopForegroundAzan();
     } catch (e, st) {
-      debugPrint('⚠ Error stopping Azan: $e\n$st');
+      debugPrint('⚠️ stopAzan error: $e\n$st');
     }
   }
 
@@ -244,7 +250,6 @@ class AudioService extends ChangeNotifier {
     _posSub?.cancel();
     _durSub?.cancel();
     _stateSub?.cancel();
-    _processingStateSub?.cancel();
     _player.dispose();
     super.dispose();
   }
