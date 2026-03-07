@@ -7,6 +7,7 @@ import '../services/audio_service.dart';
 import '../services/audio_download_service.dart';
 import 'player_screen.dart';
 import 'favorites_screen.dart';
+import 'debug_log_screen.dart';
 
 class AudioQuranScreen extends StatefulWidget {
   const AudioQuranScreen({super.key});
@@ -36,24 +37,21 @@ class _AudioQuranScreenState extends State<AudioQuranScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            // 🌿 Header with gradient
+            // ── Header ───────────────────────────────────────────────────
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [
-                    const Color.fromARGB(255, 14, 76, 61),
-                    const Color.fromARGB(255, 14, 76, 61)
-                  ],
-                ),
+              decoration: const BoxDecoration(
+                color: Color.fromARGB(255, 14, 76, 61),
               ),
               child: Row(
                 children: [
-                  // 🔙 Back Arrow
+                  // Back
                   IconButton(
                     icon: const Icon(Icons.arrow_back, color: Colors.white),
                     onPressed: () => Navigator.pop(context),
                   ),
+
+                  // Title
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -69,40 +67,49 @@ class _AudioQuranScreenState extends State<AudioQuranScreen> {
                         const SizedBox(height: 2),
                         Text(
                           '${downloadService.downloadedSurahs.length} of ${surahs.length} downloaded',
-                          style: const TextStyle(color: Colors.white70, fontSize: 12),
+                          style: const TextStyle(
+                              color: Colors.white70, fontSize: 12),
                         ),
                       ],
                     ),
                   ),
 
-                  // ⭐ Favorite button
+                  // Favourites
                   IconButton(
                     icon: const Icon(Icons.star, color: Colors.white),
-                    onPressed: () {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => FavoritesScreen(),
-                        ),
-                      );
-                    },
+                    onPressed: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (_) => FavoritesScreen()),
+                    ),
                   ),
 
+                  // Search
                   IconButton(
                     icon: const Icon(Icons.search, color: Colors.white),
-                    onPressed: () {
-                      showSearch(context: context, delegate: SurahSearch());
-                    },
+                    onPressed: () =>
+                        showSearch(context: context, delegate: SurahSearch()),
                   ),
+
+                  // Download manager
                   IconButton(
                     icon: const Icon(Icons.download, color: Colors.white),
                     onPressed: () => _showDownloadManager(context),
+                  ),
+
+                  // 🪲 Debug log viewer — tap after pressing play to see logs
+                  IconButton(
+                    icon: const Icon(Icons.bug_report, color: Colors.white),
+                    onPressed: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                          builder: (_) => const DebugLogScreen()),
+                    ),
                   ),
                 ],
               ),
             ),
 
-            // 🔍 Search Bar
+            // ── Search bar ────────────────────────────────────────────────
             Padding(
               padding: const EdgeInsets.all(12),
               child: Container(
@@ -111,11 +118,11 @@ class _AudioQuranScreenState extends State<AudioQuranScreen> {
                 decoration: BoxDecoration(
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(10),
-                  boxShadow: [
+                  boxShadow: const [
                     BoxShadow(
                       blurRadius: 4,
                       color: Colors.black12,
-                      offset: const Offset(0, 2),
+                      offset: Offset(0, 2),
                     ),
                   ],
                 ),
@@ -141,18 +148,17 @@ class _AudioQuranScreenState extends State<AudioQuranScreen> {
               ),
             ),
 
-            // 📖 List of Surahs
+            // ── Surah list ────────────────────────────────────────────────
             Expanded(
               child: ListView.builder(
                 itemCount: filtered.length,
                 itemBuilder: (ctx, i) {
                   final s = filtered[i];
                   final isFav = favService.isFav(s.number);
-                  
-                  // ✅ FIXED: Check if this is the current surah
-                  final isCurrentSurah = audioService.currentSurah?.number == s.number;
-                  final isPlaying = isCurrentSurah && audioService.isPlaying;
-                  
+                  final isCurrentSurah =
+                      audioService.currentSurah?.number == s.number;
+                  final isPlaying =
+                      isCurrentSurah && audioService.isPlaying;
                   final isDownloaded = downloadService.isDownloaded(s.number);
                   final isDownloading =
                       downloadService.isDownloading[s.number] ?? false;
@@ -174,7 +180,8 @@ class _AudioQuranScreenState extends State<AudioQuranScreen> {
                           CircleAvatar(
                             backgroundColor: Colors.teal.shade700,
                             child: Text('${s.number}',
-                                style: const TextStyle(color: Colors.white)),
+                                style:
+                                    const TextStyle(color: Colors.white)),
                           ),
                           if (isDownloading)
                             SizedBox(
@@ -194,15 +201,15 @@ class _AudioQuranScreenState extends State<AudioQuranScreen> {
                           Expanded(
                             child: Text(
                               s.nameEn,
-                              style:
-                                  const TextStyle(fontWeight: FontWeight.bold),
+                              style: const TextStyle(
+                                  fontWeight: FontWeight.bold),
                             ),
                           ),
                           if (isDownloaded)
-                            Icon(Icons.offline_pin,
+                            const Icon(Icons.offline_pin,
                                 color: Colors.green, size: 18),
                           if (!isDownloaded && !isDownloading)
-                            Icon(Icons.cloud_outlined,
+                            const Icon(Icons.cloud_outlined,
                                 color: Colors.grey, size: 18),
                         ],
                       ),
@@ -214,7 +221,7 @@ class _AudioQuranScreenState extends State<AudioQuranScreen> {
                       trailing: Wrap(
                         spacing: 4,
                         children: [
-                          // Download button
+                          // Download
                           if (!isDownloaded && !isDownloading)
                             IconButton(
                               icon: const Icon(Icons.download_outlined),
@@ -232,7 +239,7 @@ class _AudioQuranScreenState extends State<AudioQuranScreen> {
                               },
                             ),
 
-                          // Delete button
+                          // Delete
                           if (isDownloaded)
                             IconButton(
                               icon: const Icon(Icons.delete_outline),
@@ -257,11 +264,11 @@ class _AudioQuranScreenState extends State<AudioQuranScreen> {
                                     ],
                                   ),
                                 );
-
                                 if (confirm == true) {
                                   await downloadService.deleteSurah(s);
                                   if (mounted) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
+                                    ScaffoldMessenger.of(context)
+                                        .showSnackBar(
                                       SnackBar(
                                           content: Text(
                                               '🗑️ ${s.nameEn} deleted')),
@@ -271,41 +278,42 @@ class _AudioQuranScreenState extends State<AudioQuranScreen> {
                               },
                             ),
 
-                          // ✅ FIXED: Play/Pause button with proper toggle
+                          // Play / Pause
                           IconButton(
                             icon: Icon(
                               isPlaying ? Icons.pause : Icons.play_arrow,
-                              color: isCurrentSurah ? Colors.teal : Colors.grey,
+                              color: isCurrentSurah
+                                  ? Colors.teal
+                                  : Colors.grey,
                             ),
                             onPressed: isDownloading
                                 ? null
                                 : () async {
-                                    if (isCurrentSurah && audioService.isPlaying) {
-                                      // If this surah is playing, pause it
+                                    if (isCurrentSurah &&
+                                        audioService.isPlaying) {
                                       await audioService.pause();
-                                    } else if (isCurrentSurah && !audioService.isPlaying) {
-                                      // If this surah is loaded but paused, resume it
+                                    } else if (isCurrentSurah &&
+                                        !audioService.isPlaying) {
                                       await audioService.play();
                                     } else {
-                                      // If this is a different surah, load and play it
                                       audioService.setSurahAndPlay(s);
                                     }
-                                    
-                                    // Navigate to player screen
                                     Navigator.push(
                                       context,
                                       MaterialPageRoute(
-                                        builder: (_) => PlayerScreen(surah: s),
+                                        builder: (_) =>
+                                            PlayerScreen(surah: s),
                                       ),
                                     );
                                   },
                           ),
 
-                          // Favorite button
+                          // Favourite
                           IconButton(
                             icon: Icon(
                               isFav ? Icons.star : Icons.star_border,
-                              color: isFav ? Colors.orange : Colors.grey,
+                              color:
+                                  isFav ? Colors.orange : Colors.grey,
                             ),
                             onPressed: () => favService.toggle(s.number),
                           ),
@@ -314,7 +322,8 @@ class _AudioQuranScreenState extends State<AudioQuranScreen> {
                       onTap: isDownloading
                           ? null
                           : () {
-                              audioService.setSurahAndPlay(s, autoplay: false);
+                              audioService.setSurahAndPlay(s,
+                                  autoplay: false);
                               Navigator.push(
                                 context,
                                 MaterialPageRoute(
@@ -341,9 +350,7 @@ class _AudioQuranScreenState extends State<AudioQuranScreen> {
   }
 }
 
-// --------------------------------------------------------------
-// Download Manager Bottom Sheet
-// --------------------------------------------------------------
+// ── Download Manager ──────────────────────────────────────────────────────────
 
 class DownloadManagerSheet extends StatelessWidget {
   @override
@@ -358,10 +365,10 @@ class DownloadManagerSheet extends StatelessWidget {
             children: [
               const Text(
                 'Download Manager',
-                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                style: TextStyle(
+                    fontSize: 20, fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 16),
-
               FutureBuilder<String>(
                 future: downloadService.getTotalDownloadedSize(),
                 builder: (context, snapshot) {
@@ -372,9 +379,7 @@ class DownloadManagerSheet extends StatelessWidget {
                   );
                 },
               ),
-
               const SizedBox(height: 20),
-
               Row(
                 children: [
                   Expanded(
@@ -400,7 +405,8 @@ class DownloadManagerSheet extends StatelessWidget {
                         final confirm = await showDialog<bool>(
                           context: context,
                           builder: (ctx) => AlertDialog(
-                            title: const Text('Clear All Downloads'),
+                            title:
+                                const Text('Clear All Downloads'),
                             content: const Text(
                                 'This will delete all downloaded Surahs. Continue?'),
                             actions: [
@@ -417,7 +423,6 @@ class DownloadManagerSheet extends StatelessWidget {
                             ],
                           ),
                         );
-
                         if (confirm == true) {
                           await downloadService.clearAllDownloads();
                           Navigator.pop(context);
@@ -425,8 +430,8 @@ class DownloadManagerSheet extends StatelessWidget {
                       },
                       icon: const Icon(Icons.delete_sweep),
                       label: const Text('Clear All'),
-                      style:
-                          OutlinedButton.styleFrom(foregroundColor: Colors.red),
+                      style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.red),
                     ),
                   ),
                 ],
@@ -439,18 +444,19 @@ class DownloadManagerSheet extends StatelessWidget {
   }
 }
 
-// --------------------------------------------------------------
-// Search Delegate
-// --------------------------------------------------------------
+// ── Search Delegate ───────────────────────────────────────────────────────────
 
 class SurahSearch extends SearchDelegate<Surah?> {
   @override
-  List<Widget>? buildActions(BuildContext context) =>
-      [IconButton(icon: const Icon(Icons.clear), onPressed: () => query = '')];
+  List<Widget>? buildActions(BuildContext context) => [
+        IconButton(
+            icon: const Icon(Icons.clear), onPressed: () => query = '')
+      ];
 
   @override
-  Widget? buildLeading(BuildContext context) =>
-      IconButton(icon: const Icon(Icons.arrow_back), onPressed: () => close(context, null));
+  Widget? buildLeading(BuildContext context) => IconButton(
+      icon: const Icon(Icons.arrow_back),
+      onPressed: () => close(context, null));
 
   @override
   Widget buildResults(BuildContext context) {
@@ -473,22 +479,5 @@ class SurahSearch extends SearchDelegate<Surah?> {
   }
 
   @override
-  Widget buildSuggestions(BuildContext context) {
-    final sug = surahs
-        .where((s) =>
-            s.nameEn.toLowerCase().contains(query.toLowerCase()) ||
-            s.nameAr.contains(query))
-        .toList();
-    return ListView.builder(
-      itemCount: sug.length,
-      itemBuilder: (_, i) {
-        final s = sug[i];
-        return ListTile(
-          title: Text(s.nameEn),
-          subtitle: Text(s.nameAr),
-          onTap: () => close(context, s),
-        );
-      },
-    );
-  }
+  Widget buildSuggestions(BuildContext context) => buildResults(context);
 }
