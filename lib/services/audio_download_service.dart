@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'dart:developer' as dev;
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:just_audio/just_audio.dart';
@@ -7,6 +6,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/surah.dart';
 import '../data/surah_list.dart';
+import '../screens/debug_log_screen.dart'; // ← AppLogger
 
 class AudioDownloadService extends ChangeNotifier {
   static const String baseUrl =
@@ -21,21 +21,18 @@ class AudioDownloadService extends ChangeNotifier {
   int batchCompleted = 0;
   int batchTotal = 0;
 
-  AudioDownloadService() {
-    _log('🔧 AudioDownloadService created');
-    _loadDownloadedList();
-  }
+  static void _log(String msg) => AppLogger.log('[DownloadService] $msg');
 
-  void _log(String msg) {
-    dev.log(msg, name: 'AudioDownloadService');
-    debugPrint('[AudioDownloadService] $msg');
+  AudioDownloadService() {
+    _log('created');
+    _loadDownloadedList();
   }
 
   Future<void> _loadDownloadedList() async {
     final prefs = await SharedPreferences.getInstance();
     final downloaded = prefs.getStringList('downloaded_surahs') ?? [];
     downloadedSurahs = downloaded.map((e) => int.parse(e)).toSet();
-    _log('📋 Loaded ${downloadedSurahs.length} downloaded surahs from prefs');
+    _log('loaded ${downloadedSurahs.length} downloaded surahs');
     notifyListeners();
   }
 
@@ -59,100 +56,74 @@ class AudioDownloadService extends ChangeNotifier {
   // ── Audio Source ──────────────────────────────────────────────────────────
 
   Future<AudioSource> getAudioSource(Surah surah) async {
-    _log('🎵 getAudioSource: ${surah.nameEn} (#${surah.number})');
+    _log('getAudioSource: ${surah.nameEn}');
 
     final localPath = await _getLocalPath(surah.audioAsset);
-    _log('   localPath = $localPath');
-
     final exists = await _fileExists(localPath);
-    _log('   localFile exists = $exists');
+    _log('  localPath=$localPath  exists=$exists');
 
-    // 1️⃣ Permanently downloaded — instant local playback
     if (exists) {
-      _log('✅ Using permanent local file');
+      _log('✅ using permanent local file');
       return AudioSource.file(localPath);
     }
 
-    // 2️⃣ Stream via LockCachingAudioSource
-    _log('🌐 File not local — resolving GitHub redirects...');
+    _log('resolving GitHub redirects...');
     final cdnUrl = await _resolveGitHubRedirects(surah.audioAsset);
 
-    // cacheFile MUST have a .mp3 extension on iOS.
-    // GitHub CDN URLs have no file extension — without an explicit cacheFile,
-    // LockCachingAudioSource creates a cache file with no extension, and
-    // AVFoundation on iOS cannot determine the codec → silent failure / stuck loading.
     final cacheFile = await _getCacheFile(surah.audioAsset);
-    _log('💾 cacheFile = ${cacheFile.path}');
-    _log('🔗 cdnUrl = $cdnUrl');
-
     final cacheExists = await cacheFile.exists();
-    if (cacheExists) {
-      final size = await cacheFile.length();
-      _log('ℹ️ Existing cache file found: ${(size / 1024).toStringAsFixed(0)} KB');
-    }
+    final cacheSize = cacheExists ? await cacheFile.length() : 0;
+    _log('  cacheFile=${cacheFile.path}');
+    _log('  cacheExists=$cacheExists  cacheSize=${(cacheSize/1024).toStringAsFixed(0)}KB');
 
-    _log('🚀 Returning LockCachingAudioSource');
+    _log('✅ returning LockCachingAudioSource → $cdnUrl');
     return LockCachingAudioSource(
       Uri.parse(cdnUrl),
       cacheFile: cacheFile,
     );
   }
 
-  /// Returns a temp File with a guaranteed .mp3 extension for iOS codec detection.
   Future<File> _getCacheFile(String audioAsset) async {
     final dir = await getTemporaryDirectory();
     final baseName = audioAsset
         .replaceAll('/', '_')
         .replaceAll(RegExp(r'\.[^.]+$'), '');
-    final path = '${dir.path}/${baseName}.mp3';
-    _log('📁 getCacheFile → $path');
-    return File(path);
+    return File('${dir.path}/${baseName}.mp3');
   }
 
-  /// Follows GitHub Releases redirect chain manually and returns the final CDN URL.
-  /// LockCachingAudioSource's internal proxy cannot follow redirects itself —
-  /// it needs the final direct URL.
   Future<String> _resolveGitHubRedirects(String audioAsset) async {
     final rawUrl = '$baseUrl/$audioAsset';
-    _log('🔀 Resolving redirects for: $rawUrl');
-
+    _log('resolving: $rawUrl');
     String currentUrl = rawUrl;
 
     try {
       final client = http.Client();
 
       for (int i = 0; i < 10; i++) {
-        _log('   Step $i: GET (Range: bytes=0-0) $currentUrl');
-
         final req = http.Request('GET', Uri.parse(currentUrl))
           ..followRedirects = false
           ..headers['Range'] = 'bytes=0-0';
 
         final res = await client.send(req);
         await res.stream.drain();
-
-        _log('   Step $i: HTTP ${res.statusCode}');
+        _log('  redirect[$i] HTTP ${res.statusCode} → $currentUrl');
 
         if (res.statusCode >= 300 && res.statusCode < 400) {
           final location = res.headers['location'];
-          _log('   Step $i: Location header = $location');
-          if (location == null || location.isEmpty) {
-            _log('   Step $i: No Location header — stopping');
-            break;
-          }
+          _log('  Location: $location');
+          if (location == null || location.isEmpty) break;
           currentUrl = Uri.parse(currentUrl).resolve(location).toString();
         } else {
-          _log('   Step $i: Non-redirect (${res.statusCode}) — final URL reached');
+          _log('  final URL reached at step $i');
           break;
         }
       }
 
       client.close();
-      _log('✅ Final CDN URL: $currentUrl');
+      _log('✅ CDN URL: $currentUrl');
       return currentUrl;
     } catch (e) {
-      _log('❌ Redirect resolution failed: $e');
-      _log('⚠️ Falling back to raw URL: $rawUrl');
+      _log('❌ redirect resolve failed: $e  — using raw URL');
       return rawUrl;
     }
   }
@@ -160,13 +131,11 @@ class AudioDownloadService extends ChangeNotifier {
   // ── Explicit Download ─────────────────────────────────────────────────────
 
   Future<bool> downloadSurah(Surah surah) async {
-    _log('📥 downloadSurah: ${surah.nameEn}');
-
+    _log('downloadSurah: ${surah.nameEn}');
     try {
       final localPath = await _getLocalPath(surah.audioAsset);
-
       if (await _fileExists(localPath)) {
-        _log('✅ Already downloaded: $localPath');
+        _log('already downloaded');
         downloadedSurahs.add(surah.number);
         await _saveDownloadedList();
         notifyListeners();
@@ -177,20 +146,15 @@ class AudioDownloadService extends ChangeNotifier {
       downloadProgress[surah.number] = 0.0;
       notifyListeners();
 
-      final url = '$baseUrl/${surah.audioAsset}';
-      _log('🌐 Downloading from: $url');
-
-      final request = http.Request('GET', Uri.parse(url));
+      final request =
+          http.Request('GET', Uri.parse('$baseUrl/${surah.audioAsset}'));
       final response = await request.send();
+      _log('download HTTP ${response.statusCode}');
 
-      _log('   HTTP response: ${response.statusCode}');
-
-      if (response.statusCode != 200) {
-        throw Exception('HTTP ${response.statusCode}');
-      }
+      if (response.statusCode != 200) throw Exception('HTTP ${response.statusCode}');
 
       final totalBytes = response.contentLength ?? 0;
-      _log('   Total size: ${(totalBytes / 1024 / 1024).toStringAsFixed(2)} MB');
+      _log('total: ${(totalBytes / 1024 / 1024).toStringAsFixed(2)} MB');
 
       final file = File(localPath);
       await file.parent.create(recursive: true);
@@ -207,9 +171,7 @@ class AudioDownloadService extends ChangeNotifier {
       }
 
       await sink.close();
-
-      final finalSize = await file.length();
-      _log('✅ Download complete: ${(finalSize / 1024 / 1024).toStringAsFixed(2)} MB saved to $localPath');
+      _log('✅ saved ${(received/1024/1024).toStringAsFixed(2)} MB → $localPath');
 
       downloadedSurahs.add(surah.number);
       await _saveDownloadedList();
@@ -218,7 +180,7 @@ class AudioDownloadService extends ChangeNotifier {
       notifyListeners();
       return true;
     } catch (e, st) {
-      _log('❌ Download failed: $e\n$st');
+      _log('❌ download failed: $e\n$st');
       isDownloading[surah.number] = false;
       downloadProgress[surah.number] = 0.0;
       notifyListeners();
@@ -227,32 +189,22 @@ class AudioDownloadService extends ChangeNotifier {
   }
 
   Future<bool> deleteSurah(Surah surah) async {
-    _log('🗑 deleteSurah: ${surah.nameEn}');
     try {
       final file = File(await _getLocalPath(surah.audioAsset));
-      if (await file.exists()) {
-        await file.delete();
-        _log('   Deleted permanent file');
-      }
-
+      if (await file.exists()) await file.delete();
       final cacheFile = await _getCacheFile(surah.audioAsset);
-      if (await cacheFile.exists()) {
-        await cacheFile.delete();
-        _log('   Deleted cache file');
-      }
-
+      if (await cacheFile.exists()) await cacheFile.delete();
       downloadedSurahs.remove(surah.number);
       await _saveDownloadedList();
       notifyListeners();
       return true;
     } catch (e) {
-      _log('❌ Delete failed: $e');
+      _log('❌ delete failed: $e');
       return false;
     }
   }
 
   Future<void> downloadAll(List<Surah> surahs) async {
-    _log('📦 downloadAll: ${surahs.length} surahs');
     isBatchDownloading = true;
     batchCompleted = 0;
     batchTotal = surahs.where((s) => !isDownloaded(s.number)).length;
@@ -270,7 +222,6 @@ class AudioDownloadService extends ChangeNotifier {
     }
 
     isBatchDownloading = false;
-    _log('✅ downloadAll complete: $batchCompleted downloaded');
     notifyListeners();
   }
 
@@ -281,13 +232,10 @@ class AudioDownloadService extends ChangeNotifier {
       final file = File(await _getLocalPath(surah.audioAsset));
       if (await file.exists()) totalBytes += await file.length();
     }
-    final result = '${(totalBytes / 1024 / 1024).toStringAsFixed(2)} MB';
-    _log('💾 Total downloaded: $result');
-    return result;
+    return '${(totalBytes / 1024 / 1024).toStringAsFixed(2)} MB';
   }
 
   Future<void> clearAllDownloads() async {
-    _log('🧹 clearAllDownloads');
     for (final num in downloadedSurahs.toList()) {
       await deleteSurah(surahs.firstWhere((s) => s.number == num));
     }
