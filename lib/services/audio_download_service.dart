@@ -6,10 +6,10 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/surah.dart';
 import '../data/surah_list.dart';
-import '../screens/debug_log_screen.dart'; // ← AppLogger
+import '../screens/debug_log_screen.dart';
 
 class AudioDownloadService extends ChangeNotifier {
-  static const String baseUrl =
+  static const String _baseUrl =
       'https://github.com/aounrshah/audio-files/releases/download/v1.0';
 
   Map<int, double> downloadProgress = {};
@@ -28,10 +28,12 @@ class AudioDownloadService extends ChangeNotifier {
     _loadDownloadedList();
   }
 
+  // ── Persistence ───────────────────────────────────────────────────────────
+
   Future<void> _loadDownloadedList() async {
     final prefs = await SharedPreferences.getInstance();
-    final downloaded = prefs.getStringList('downloaded_surahs') ?? [];
-    downloadedSurahs = downloaded.map((e) => int.parse(e)).toSet();
+    final list = prefs.getStringList('downloaded_surahs') ?? [];
+    downloadedSurahs = list.map(int.parse).toSet();
     _log('loaded ${downloadedSurahs.length} downloaded surahs');
     notifyListeners();
   }
@@ -39,123 +41,105 @@ class AudioDownloadService extends ChangeNotifier {
   Future<void> _saveDownloadedList() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setStringList(
-      'downloaded_surahs',
-      downloadedSurahs.map((e) => e.toString()).toList(),
-    );
+        'downloaded_surahs', downloadedSurahs.map((e) => e.toString()).toList());
   }
 
-  bool isDownloaded(int surahNumber) => downloadedSurahs.contains(surahNumber);
+  bool isDownloaded(int n) => downloadedSurahs.contains(n);
 
-  Future<String> _getLocalPath(String audioAsset) async {
+  Future<String> _permanentPath(String audioAsset) async {
     final dir = await getApplicationDocumentsDirectory();
     return '${dir.path}/$audioAsset';
   }
 
-  Future<bool> _fileExists(String path) async => File(path).exists();
-
-  // ── Audio Source ──────────────────────────────────────────────────────────
+  // ── Core: getAudioSource ─────────────────────────────────────────────────
+  //
+  // KEY INSIGHT:
+  //   LockCachingAudioSource and StreamAudioSource both route through
+  //   just_audio's localhost HTTP proxy. On iOS in release/TestFlight builds
+  //   that proxy breaks signed CDN URLs (query params get corrupted or the
+  //   cleartext localhost connection is blocked) → -11828 "Cannot Open".
+  //
+  //   AudioSource.uri() gives the URL DIRECTLY to AVPlayer with NO proxy.
+  //   AVPlayer natively handles HTTPS URLs with query parameters perfectly.
+  //   This is the correct approach for streaming from a CDN on iOS.
 
   Future<AudioSource> getAudioSource(Surah surah) async {
     _log('getAudioSource: ${surah.nameEn}');
 
-    final localPath = await _getLocalPath(surah.audioAsset);
-    final exists = await _fileExists(localPath);
-    _log('  localPath=$localPath  exists=$exists');
-
-    if (exists) {
-      _log('✅ using permanent local file');
-      return AudioSource.file(localPath);
+    // 1. If permanently downloaded, play from local file (best experience)
+    final permPath = await _permanentPath(surah.audioAsset);
+    if (await File(permPath).exists()) {
+      _log('✅ permanent file → AudioSource.file');
+      return AudioSource.file(permPath);
     }
 
-    _log('resolving GitHub redirects...');
-    final cdnUrl = await _resolveGitHubRedirects(surah.audioAsset);
-
-    final cacheFile = await _getCacheFile(surah.audioAsset);
-    final cacheExists = await cacheFile.exists();
-    final cacheSize = cacheExists ? await cacheFile.length() : 0;
-    _log('  cacheFile=${cacheFile.path}');
-    _log('  cacheExists=$cacheExists  cacheSize=${(cacheSize/1024).toStringAsFixed(0)}KB');
-
-    _log('✅ returning LockCachingAudioSource → $cdnUrl');
-    return LockCachingAudioSource(
-      Uri.parse(cdnUrl),
-      cacheFile: cacheFile,
-    );
+    // 2. Resolve GitHub redirect to the real CDN URL, then give it directly
+    //    to AVPlayer via AudioSource.uri() — no proxy, no broken query params.
+    _log('streaming: resolving GitHub redirect...');
+    final cdnUrl = await _resolveGitHubRedirect(surah.audioAsset);
+    _log('✅ AudioSource.uri ready — handing to AVPlayer (no proxy)');
+    _log('   URL starts with: ${cdnUrl.substring(0, 60)}...');
+    return AudioSource.uri(Uri.parse(cdnUrl));
   }
 
-  Future<File> _getCacheFile(String audioAsset) async {
-    final dir = await getTemporaryDirectory();
-    final baseName = audioAsset
-        .replaceAll('/', '_')
-        .replaceAll(RegExp(r'\.[^.]+$'), '');
-    return File('${dir.path}/${baseName}.mp3');
-  }
+  // ── Redirect resolver ─────────────────────────────────────────────────────
 
-  Future<String> _resolveGitHubRedirects(String audioAsset) async {
-    final rawUrl = '$baseUrl/$audioAsset';
+  Future<String> _resolveGitHubRedirect(String audioAsset) async {
+    final rawUrl = '$_baseUrl/$audioAsset';
     _log('resolving: $rawUrl');
-    String currentUrl = rawUrl;
-
+    String url = rawUrl;
+    final client = http.Client();
     try {
-      final client = http.Client();
-
       for (int i = 0; i < 10; i++) {
-        final req = http.Request('GET', Uri.parse(currentUrl))
+        final req = http.Request('GET', Uri.parse(url))
           ..followRedirects = false
           ..headers['Range'] = 'bytes=0-0';
-
         final res = await client.send(req);
         await res.stream.drain();
-        _log('  redirect[$i] HTTP ${res.statusCode} → $currentUrl');
-
+        _log('  [$i] HTTP ${res.statusCode}');
         if (res.statusCode >= 300 && res.statusCode < 400) {
-          final location = res.headers['location'];
-          _log('  Location: $location');
-          if (location == null || location.isEmpty) break;
-          currentUrl = Uri.parse(currentUrl).resolve(location).toString();
+          final loc = res.headers['location'];
+          if (loc == null || loc.isEmpty) break;
+          url = Uri.parse(url).resolve(loc).toString();
+          _log('  → redirecting to CDN URL');
         } else {
-          _log('  final URL reached at step $i');
+          _log('  → final URL reached');
           break;
         }
       }
-
+    } finally {
       client.close();
-      _log('✅ CDN URL: $currentUrl');
-      return currentUrl;
-    } catch (e) {
-      _log('❌ redirect resolve failed: $e  — using raw URL');
-      return rawUrl;
     }
+    _log('✅ resolved CDN URL (length=${url.length})');
+    return url;
   }
 
-  // ── Explicit Download ─────────────────────────────────────────────────────
+  // ── Explicit Download (Download button) ───────────────────────────────────
 
   Future<bool> downloadSurah(Surah surah) async {
     _log('downloadSurah: ${surah.nameEn}');
-    try {
-      final localPath = await _getLocalPath(surah.audioAsset);
-      if (await _fileExists(localPath)) {
-        _log('already downloaded');
-        downloadedSurahs.add(surah.number);
-        await _saveDownloadedList();
-        notifyListeners();
-        return true;
-      }
+    final localPath = await _permanentPath(surah.audioAsset);
 
+    if (await File(localPath).exists()) {
+      _log('already downloaded');
+      downloadedSurahs.add(surah.number);
+      await _saveDownloadedList();
+      notifyListeners();
+      return true;
+    }
+
+    try {
       isDownloading[surah.number] = true;
       downloadProgress[surah.number] = 0.0;
       notifyListeners();
 
-      final request =
-          http.Request('GET', Uri.parse('$baseUrl/${surah.audioAsset}'));
+      final cdnUrl = await _resolveGitHubRedirect(surah.audioAsset);
+      final request = http.Request('GET', Uri.parse(cdnUrl));
       final response = await request.send();
       _log('download HTTP ${response.statusCode}');
-
       if (response.statusCode != 200) throw Exception('HTTP ${response.statusCode}');
 
       final totalBytes = response.contentLength ?? 0;
-      _log('total: ${(totalBytes / 1024 / 1024).toStringAsFixed(2)} MB');
-
       final file = File(localPath);
       await file.parent.create(recursive: true);
       final sink = file.openWrite();
@@ -169,10 +153,10 @@ class AudioDownloadService extends ChangeNotifier {
           notifyListeners();
         }
       }
-
+      await sink.flush();
       await sink.close();
-      _log('✅ saved ${(received/1024/1024).toStringAsFixed(2)} MB → $localPath');
 
+      _log('✅ saved ${(received / 1024 / 1024).toStringAsFixed(2)} MB');
       downloadedSurahs.add(surah.number);
       await _saveDownloadedList();
       isDownloading[surah.number] = false;
@@ -180,7 +164,7 @@ class AudioDownloadService extends ChangeNotifier {
       notifyListeners();
       return true;
     } catch (e, st) {
-      _log('❌ download failed: $e\n$st');
+      _log('❌ downloadSurah error: $e\n$st');
       isDownloading[surah.number] = false;
       downloadProgress[surah.number] = 0.0;
       notifyListeners();
@@ -190,16 +174,14 @@ class AudioDownloadService extends ChangeNotifier {
 
   Future<bool> deleteSurah(Surah surah) async {
     try {
-      final file = File(await _getLocalPath(surah.audioAsset));
+      final file = File(await _permanentPath(surah.audioAsset));
       if (await file.exists()) await file.delete();
-      final cacheFile = await _getCacheFile(surah.audioAsset);
-      if (await cacheFile.exists()) await cacheFile.delete();
       downloadedSurahs.remove(surah.number);
       await _saveDownloadedList();
       notifyListeners();
       return true;
     } catch (e) {
-      _log('❌ delete failed: $e');
+      _log('❌ deleteSurah: $e');
       return false;
     }
   }
@@ -210,29 +192,27 @@ class AudioDownloadService extends ChangeNotifier {
     batchTotal = surahs.where((s) => !isDownloaded(s.number)).length;
     batchProgress = 0.0;
     notifyListeners();
-
-    for (final surah in surahs) {
-      if (!isDownloaded(surah.number)) {
-        if (await downloadSurah(surah)) {
+    for (final s in surahs) {
+      if (!isDownloaded(s.number)) {
+        if (await downloadSurah(s)) {
           batchCompleted++;
           batchProgress = batchCompleted / batchTotal;
           notifyListeners();
         }
       }
     }
-
     isBatchDownloading = false;
     notifyListeners();
   }
 
   Future<String> getTotalDownloadedSize() async {
-    int totalBytes = 0;
+    int total = 0;
     for (final num in downloadedSurahs) {
-      final surah = surahs.firstWhere((s) => s.number == num);
-      final file = File(await _getLocalPath(surah.audioAsset));
-      if (await file.exists()) totalBytes += await file.length();
+      final s = surahs.firstWhere((s) => s.number == num);
+      final f = File(await _permanentPath(s.audioAsset));
+      if (await f.exists()) total += await f.length();
     }
-    return '${(totalBytes / 1024 / 1024).toStringAsFixed(2)} MB';
+    return '${(total / 1024 / 1024).toStringAsFixed(2)} MB';
   }
 
   Future<void> clearAllDownloads() async {
