@@ -73,13 +73,17 @@ class _QiblaScreenState extends State<QiblaScreen> {
       // Step 1: Check if location services are on
       final serviceEnabled = await Geolocator.isLocationServiceEnabled();
       if (!serviceEnabled) {
-        await Geolocator.openLocationSettings();
         if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("Location services are disabled. Please enable them in your device settings."),
+          ),
+        );
         setState(() => _granted = false);
         return;
       }
 
-      // Step 2: Check/request permission — let Geolocator handle it fully
+      // Step 2: Check/request permission
       LocationPermission permission = await Geolocator.checkPermission();
 
       if (permission == LocationPermission.denied) {
@@ -87,15 +91,16 @@ class _QiblaScreenState extends State<QiblaScreen> {
       }
 
       if (permission == LocationPermission.deniedForever) {
-        // User permanently blocked — send to settings
-        await Geolocator.openAppSettings();
+        // ✅ Apple-compliant: do NOT auto-open Settings here.
+        // Just inform the user gracefully and let them choose.
         if (!mounted) return;
         setState(() => _granted = false);
+        _showPermissionDeniedDialog();
         return;
       }
 
       if (permission == LocationPermission.denied) {
-        // User dismissed/denied the dialog
+        // User dismissed/denied — accept gracefully
         if (!mounted) return;
         setState(() => _granted = false);
         return;
@@ -125,9 +130,38 @@ class _QiblaScreenState extends State<QiblaScreen> {
       debugPrint("Location error: $e");
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Please enable location services")),
+        const SnackBar(content: Text("Could not retrieve location. Please try again.")),
       );
     }
+  }
+
+  /// ✅ Apple-compliant Settings dialog.
+  /// Only shown AFTER denial, as an informational prompt — not an automatic redirect.
+  /// Always includes a "Cancel" option so the user is never forced to Settings.
+  void _showPermissionDeniedDialog() {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Location Access Needed"),
+        content: const Text(
+          "Qibla direction requires your location. "
+          "You can enable it anytime in Settings.",
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text("Cancel"),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              Geolocator.openAppSettings();
+            },
+            child: const Text("Open Settings"),
+          ),
+        ],
+      ),
+    );
   }
 
   double _calculateBearing(
